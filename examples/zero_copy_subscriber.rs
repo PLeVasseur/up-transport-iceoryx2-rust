@@ -19,7 +19,7 @@ use up_transport_iceoryx2_rust::{MessagingPattern, transport::UTransportIceoryx2
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topic = UUri::from_str("//my-vehicle/4210/1/9000")?;
-    let transport = UTransportIceoryx2::build_zero_copy(MessagingPattern::PublishSubscribe)?;
+    let transport = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
 
     for _ in 0..100 {
         match transport.receive_zero_copy(&topic, None).await {

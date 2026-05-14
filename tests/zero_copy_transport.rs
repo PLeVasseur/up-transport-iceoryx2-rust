@@ -16,7 +16,7 @@ use std::sync::Arc;
 use protobuf::well_known_types::wrappers::StringValue;
 use tokio::{sync::mpsc, time::Duration};
 use up_rust::{
-    ProtobufWire, UAttributes, UCode, UDeserializer, UEncoding, UFrameHeader, UMessageType,
+    ProtobufWire, UAttributes, UCode, UDeserializer, UEncoding, UFrameMetadata, UMessageType,
     UPriority, USerializer, UUID, UUri, UWireError, UZeroCopyListener, UZeroCopyRxFrame,
     UZeroCopyTransport, UZeroCopyTransportExt, WireFormat,
 };
@@ -99,7 +99,7 @@ struct LeaseSender(mpsc::UnboundedSender<(UEncoding, TestReading)>);
 #[async_trait::async_trait]
 impl UZeroCopyListener<Iceoryx2RxLease> for LeaseSender {
     async fn on_receive_zero_copy(&self, frame: Iceoryx2RxLease) {
-        let encoding = frame.header().encoding().clone();
+        let encoding = frame.metadata().encoding().clone();
         let reading = frame
             .deserialize_borrowed::<TestReadingWire, TestReading>()
             .expect("failed to deserialize zero-copy payload");
@@ -114,8 +114,8 @@ async fn zero_copy_transport_round_trips_custom_wire_format()
 -> Result<(), Box<dyn std::error::Error>> {
     let authority = format!("iox-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9002)?;
-    let subscriber = UTransportIceoryx2::build_zero_copy(MessagingPattern::PublishSubscribe)?;
-    let publisher = UTransportIceoryx2::build_zero_copy(MessagingPattern::PublishSubscribe)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
 
     // Create the subscriber port before publishing. An initial empty receive is expected.
     let _ = subscriber.receive_zero_copy(&topic, None).await;
@@ -130,7 +130,7 @@ async fn zero_copy_transport_round_trips_custom_wire_format()
         for _ in 0..50 {
             publisher
                 .send_serialized_zero_copy::<TestReadingWire, _>(
-                    UFrameHeader::publish(send_topic.clone()),
+                    UFrameMetadata::publish(send_topic.clone()),
                     &send_reading,
                 )
                 .await?;
@@ -142,7 +142,7 @@ async fn zero_copy_transport_round_trips_custom_wire_format()
     for _ in 0..100 {
         match subscriber.receive_zero_copy(&topic, None).await {
             Ok(rx) => {
-                assert_eq!(rx.header().encoding(), &TestReadingWire::encoding());
+                assert_eq!(rx.metadata().encoding(), &TestReadingWire::encoding());
                 assert_eq!(
                     rx.deserialize_borrowed::<TestReadingWire, TestReading>()?,
                     reading
@@ -166,8 +166,8 @@ async fn zero_copy_transport_round_trips_protobuf_wire_format()
 -> Result<(), Box<dyn std::error::Error>> {
     let authority = format!("iox-pb-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9006)?;
-    let subscriber = UTransportIceoryx2::build_zero_copy(MessagingPattern::PublishSubscribe)?;
-    let publisher = UTransportIceoryx2::build_zero_copy(MessagingPattern::PublishSubscribe)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
 
     let _ = subscriber.receive_zero_copy(&topic, None).await;
 
@@ -179,7 +179,7 @@ async fn zero_copy_transport_round_trips_protobuf_wire_format()
         for _ in 0..50 {
             publisher
                 .send_serialized_zero_copy::<ProtobufWire, _>(
-                    UFrameHeader::publish(send_topic.clone()),
+                    UFrameMetadata::publish(send_topic.clone()),
                     &send_payload,
                 )
                 .await?;
@@ -191,7 +191,7 @@ async fn zero_copy_transport_round_trips_protobuf_wire_format()
     for _ in 0..100 {
         match subscriber.receive_zero_copy(&topic, None).await {
             Ok(rx) => {
-                assert_eq!(rx.header().encoding(), &ProtobufWire::encoding());
+                assert_eq!(rx.metadata().encoding(), &ProtobufWire::encoding());
                 let decoded: StringValue = rx.deserialize_borrowed::<ProtobufWire, _>()?;
                 assert_eq!(decoded.value, payload.value);
                 sender.abort();
@@ -214,8 +214,8 @@ async fn zero_copy_transport_preserves_native_frame_metadata()
     let authority = format!("iox-metadata-test-{}", std::process::id());
     let source = UUri::try_from_parts(&authority, 0x4210, 1, 0x9008)?;
     let sink = UUri::try_from_parts(&authority, 0x4210, 1, 0)?;
-    let subscriber = UTransportIceoryx2::build_zero_copy(MessagingPattern::PublishSubscribe)?;
-    let publisher = UTransportIceoryx2::build_zero_copy(MessagingPattern::PublishSubscribe)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
 
     let _ = subscriber.receive_zero_copy(&source, Some(&sink)).await;
 
@@ -234,7 +234,7 @@ async fn zero_copy_transport_preserves_native_frame_metadata()
     .with_token("zero-copy-auth-token")
     .with_permission_level(9)
     .with_commstatus(UCode::RESOURCE_EXHAUSTED);
-    let header = UFrameHeader::new(attributes, TestReadingWire::encoding());
+    let header = UFrameMetadata::new(attributes, TestReadingWire::encoding());
     let reading = TestReading {
         sensor_id: 12,
         counter: 144,
@@ -254,7 +254,7 @@ async fn zero_copy_transport_preserves_native_frame_metadata()
     for _ in 0..100 {
         match subscriber.receive_zero_copy(&source, Some(&sink)).await {
             Ok(rx) => {
-                let received = rx.header().attributes();
+                let received = rx.metadata().attributes();
                 assert_eq!(received.id(), &id);
                 assert_eq!(received.source(), &source);
                 assert_eq!(received.sink(), Some(&sink));
@@ -269,7 +269,7 @@ async fn zero_copy_transport_preserves_native_frame_metadata()
                 assert_eq!(received.token(), Some("zero-copy-auth-token"));
                 assert_eq!(received.permission_level(), Some(9));
                 assert_eq!(received.commstatus(), Some(UCode::RESOURCE_EXHAUSTED));
-                assert_eq!(rx.header().encoding(), &TestReadingWire::encoding());
+                assert_eq!(rx.metadata().encoding(), &TestReadingWire::encoding());
                 assert_eq!(
                     rx.deserialize_borrowed::<TestReadingWire, TestReading>()?,
                     reading
@@ -293,8 +293,8 @@ async fn zero_copy_listener_round_trips_custom_wire_format()
 -> Result<(), Box<dyn std::error::Error>> {
     let authority = format!("iox-listener-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9003)?;
-    let subscriber = UTransportIceoryx2::build_zero_copy(MessagingPattern::PublishSubscribe)?;
-    let publisher = UTransportIceoryx2::build_zero_copy(MessagingPattern::PublishSubscribe)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
     let (tx, mut rx) = mpsc::unbounded_channel();
     let listener: Arc<dyn UZeroCopyListener<Iceoryx2RxLease>> = Arc::new(LeaseSender(tx));
 
@@ -312,7 +312,7 @@ async fn zero_copy_listener_round_trips_custom_wire_format()
         for _ in 0..50 {
             publisher
                 .send_serialized_zero_copy::<TestReadingWire, _>(
-                    UFrameHeader::publish(send_topic.clone()),
+                    UFrameMetadata::publish(send_topic.clone()),
                     &send_reading,
                 )
                 .await?;
@@ -336,7 +336,7 @@ async fn exposes_iceoryx2_service_names_for_streamer_discovery()
 -> Result<(), Box<dyn std::error::Error>> {
     let authority = format!("iox-discovery-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9004)?;
-    let transport = UTransportIceoryx2::build_zero_copy(MessagingPattern::PublishSubscribe)?;
+    let transport = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
     let expected_service = Iceoryx2PubSub::publish_subscribe_service_name(&topic, None)?;
 
     let _ = transport.receive_zero_copy(&topic, None).await;

@@ -12,12 +12,9 @@
 // ################################################################################
 
 use iceoryx2::prelude::ZeroCopySend;
-use iceoryx2_bb_container::vec::FixedSizeVec;
 use up_rust::{
-    UAttributes, UCode, UEncoding, UFrameHeader, UMessageType, UPriority, UStatus, UUID, UUri,
+    UAttributes, UCode, UEncoding, UFrameMetadata, UMessageType, UPriority, UStatus, UUID, UUri,
 };
-
-pub const MAX_AUTHORITY_NAME_LENGTH: usize = 128;
 
 const FRAME_METADATA_MAGIC: &[u8; 4] = b"UFM1";
 
@@ -38,12 +35,10 @@ pub struct UProtocolHeader {
     pub(crate) permission_level: u32,
     pub(crate) commstatus_present: u8,
     pub(crate) commstatus: u8,
-    pub(crate) source_authority: FixedSizeVec<u8, MAX_AUTHORITY_NAME_LENGTH>,
     pub(crate) source_ue_id: u32,
     pub(crate) source_ue_version_major: u32,
     pub(crate) source_resource_id: u32,
     pub(crate) sink_present: u8,
-    pub(crate) sink_authority: FixedSizeVec<u8, MAX_AUTHORITY_NAME_LENGTH>,
     pub(crate) sink_ue_id: u32,
     pub(crate) sink_ue_version_major: u32,
     pub(crate) sink_resource_id: u32,
@@ -53,9 +48,9 @@ pub struct UProtocolHeader {
 }
 
 impl UProtocolHeader {
-    pub(crate) fn write_frame_header(
+    pub(crate) fn write_frame_metadata(
         &mut self,
-        header: &UFrameHeader,
+        header: &UFrameMetadata,
         metadata_len: usize,
         payload_len: usize,
         payload_alignment: usize,
@@ -104,25 +99,16 @@ impl UProtocolHeader {
         self.payload_alignment = u64::try_from(payload_alignment).map_err(|_| {
             UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "payload alignment exceeds u64")
         })?;
-        write_uri_fields(
-            &mut self.source_authority,
-            &mut self.source_ue_id,
-            &mut self.source_ue_version_major,
-            &mut self.source_resource_id,
-            header.attributes().source(),
-        )?;
+        self.source_ue_id = header.attributes().source().ue_id;
+        self.source_ue_version_major = header.attributes().source().ue_version_major;
+        self.source_resource_id = header.attributes().source().resource_id;
         if let Some(sink) = header.attributes().sink() {
             self.sink_present = 1;
-            write_uri_fields(
-                &mut self.sink_authority,
-                &mut self.sink_ue_id,
-                &mut self.sink_ue_version_major,
-                &mut self.sink_resource_id,
-                sink,
-            )?;
+            self.sink_ue_id = sink.ue_id;
+            self.sink_ue_version_major = sink.ue_version_major;
+            self.sink_resource_id = sink.resource_id;
         } else {
             self.sink_present = 0;
-            self.sink_authority = FixedSizeVec::new();
             self.sink_ue_id = 0;
             self.sink_ue_version_major = 0;
             self.sink_resource_id = 0;
@@ -130,21 +116,32 @@ impl UProtocolHeader {
         Ok(())
     }
 
-    pub(crate) fn frame_header(&self, sample_payload: &[u8]) -> Result<UFrameHeader, UStatus> {
+    pub(crate) fn frame_metadata(&self, sample_payload: &[u8]) -> Result<UFrameMetadata, UStatus> {
         let id = UUID::from_u64_pair(self.id_msb, self.id_lsb).map_err(|e| {
             UStatus::fail_with_code(UCode::INVALID_ARGUMENT, format!("invalid UUID: {e}"))
         })?;
+        let metadata = self.metadata(sample_payload)?;
+        let metadata = FrameMetadata::decode(metadata)?;
         let source = read_uri_fields(
-            &self.source_authority,
+            metadata.source_authority,
             self.source_ue_id,
             self.source_ue_version_major,
             self.source_resource_id,
         )?;
         let sink = if self.sink_present == 0 {
+            if metadata.sink_authority.is_some() {
+                return Err(UStatus::fail_with_code(
+                    UCode::INVALID_ARGUMENT,
+                    "sink authority metadata present without sink fields",
+                ));
+            }
             None
         } else {
+            let sink_authority = metadata.sink_authority.ok_or_else(|| {
+                UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "sink authority metadata missing")
+            })?;
             Some(read_uri_fields(
-                &self.sink_authority,
+                sink_authority,
                 self.sink_ue_id,
                 self.sink_ue_version_major,
                 self.sink_resource_id,
@@ -172,15 +169,13 @@ impl UProtocolHeader {
             })?;
             attributes = attributes.with_commstatus(commstatus);
         }
-        let metadata = self.metadata(sample_payload)?;
-        let metadata = FrameMetadata::decode(metadata)?;
         if let Some(traceparent) = metadata.traceparent {
             attributes = attributes.with_traceparent(traceparent);
         }
         if let Some(token) = metadata.token {
             attributes = attributes.with_token(token);
         }
-        Ok(UFrameHeader::new(attributes, metadata.encoding))
+        Ok(UFrameMetadata::new(attributes, metadata.encoding))
     }
 
     pub(crate) fn payload_layout(
@@ -215,8 +210,13 @@ impl UProtocolHeader {
     }
 }
 
-pub(crate) fn encode_frame_metadata(header: &UFrameHeader) -> Result<Vec<u8>, UStatus> {
+pub(crate) fn encode_frame_metadata(header: &UFrameMetadata) -> Result<Vec<u8>, UStatus> {
     FrameMetadata {
+        source_authority: header.attributes().source().authority_name.clone(),
+        sink_authority: header
+            .attributes()
+            .sink()
+            .map(|sink| sink.authority_name.clone()),
         encoding: header.encoding().clone(),
         traceparent: header.attributes().traceparent().map(str::to_owned),
         token: header.attributes().token().map(str::to_owned),
@@ -225,6 +225,8 @@ pub(crate) fn encode_frame_metadata(header: &UFrameHeader) -> Result<Vec<u8>, US
 }
 
 struct FrameMetadata {
+    source_authority: String,
+    sink_authority: Option<String>,
     encoding: UEncoding,
     traceparent: Option<String>,
     token: Option<String>,
@@ -234,6 +236,8 @@ impl FrameMetadata {
     fn encode(&self) -> Result<Vec<u8>, UStatus> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(FRAME_METADATA_MAGIC);
+        write_string(&mut bytes, &self.source_authority)?;
+        write_optional_string(&mut bytes, self.sink_authority.as_deref())?;
         write_string(&mut bytes, self.encoding.format_id())?;
         write_string(&mut bytes, self.encoding.content_type())?;
         write_optional_string(&mut bytes, self.encoding.schema_ref())?;
@@ -250,6 +254,8 @@ impl FrameMetadata {
                 "invalid frame metadata",
             ));
         }
+        let source_authority = read_string(&mut bytes)?;
+        let sink_authority = read_optional_string(&mut bytes)?;
         let format_id = read_string(&mut bytes)?;
         let content_type = read_string(&mut bytes)?;
         let schema_ref = read_optional_string(&mut bytes)?;
@@ -262,6 +268,8 @@ impl FrameMetadata {
             ));
         }
         Ok(Self {
+            source_authority,
+            sink_authority,
             encoding: UEncoding::new(format_id, content_type, schema_ref),
             traceparent,
             token,
@@ -269,28 +277,14 @@ impl FrameMetadata {
     }
 }
 
-fn write_uri_fields(
-    authority: &mut FixedSizeVec<u8, MAX_AUTHORITY_NAME_LENGTH>,
-    ue_id: &mut u32,
-    ue_version_major: &mut u32,
-    resource_id: &mut u32,
-    uri: &UUri,
-) -> Result<(), UStatus> {
-    write_fixed_vec(authority, uri.authority_name.as_bytes())?;
-    *ue_id = uri.ue_id;
-    *ue_version_major = uri.ue_version_major;
-    *resource_id = uri.resource_id;
-    Ok(())
-}
-
 fn read_uri_fields(
-    authority: &FixedSizeVec<u8, MAX_AUTHORITY_NAME_LENGTH>,
+    authority_name: String,
     ue_id: u32,
     ue_version_major: u32,
     resource_id: u32,
 ) -> Result<UUri, UStatus> {
     let uri = UUri {
-        authority_name: fixed_vec_to_string(authority)?,
+        authority_name,
         ue_id,
         ue_version_major,
         resource_id,
@@ -298,35 +292,6 @@ fn read_uri_fields(
     uri.check_validity()
         .map_err(|e| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, e.to_string()))?;
     Ok(uri)
-}
-
-fn write_fixed_vec<const CAPACITY: usize>(
-    dst: &mut FixedSizeVec<u8, CAPACITY>,
-    bytes: &[u8],
-) -> Result<(), UStatus> {
-    if bytes.len() > CAPACITY {
-        return Err(UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
-            format!("metadata field too large: {} > {CAPACITY}", bytes.len()),
-        ));
-    }
-    let mut replacement = FixedSizeVec::new();
-    for byte in bytes.iter() {
-        replacement.push(*byte);
-    }
-    *dst = replacement;
-    Ok(())
-}
-
-fn fixed_vec_to_string<const CAPACITY: usize>(
-    src: &FixedSizeVec<u8, CAPACITY>,
-) -> Result<String, UStatus> {
-    String::from_utf8(src.as_slice().to_vec()).map_err(|e| {
-        UStatus::fail_with_code(
-            UCode::INVALID_ARGUMENT,
-            format!("metadata field is not valid UTF-8: {e}"),
-        )
-    })
 }
 
 fn write_string(dst: &mut Vec<u8>, value: &str) -> Result<(), UStatus> {
@@ -440,5 +405,44 @@ fn byte_to_priority(value: u8) -> Result<UPriority, UStatus> {
             UCode::INVALID_ARGUMENT,
             "invalid priority",
         )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn frame_metadata_round_trips_authorities_via_prefix() {
+        let source = UUri::try_from_parts(&"a".repeat(128), 0x4210, 1, 0x8001).unwrap();
+        let sink = UUri::try_from_parts(&"b".repeat(128), 0x4210, 1, 0).unwrap();
+        let attributes = UAttributes::new(
+            UUID::build(),
+            source.clone(),
+            Some(sink.clone()),
+            UMessageType::Notification,
+        )
+        .with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
+        .with_token("test-token");
+        let metadata = UFrameMetadata::new(
+            attributes,
+            UEncoding::new("json", "application/json", Some("schema://reading")),
+        );
+        let prefix = encode_frame_metadata(&metadata).unwrap();
+        let mut user_header = UProtocolHeader::default();
+
+        user_header
+            .write_frame_metadata(&metadata, prefix.len(), 0, 1)
+            .unwrap();
+
+        let decoded = user_header.frame_metadata(&prefix).unwrap();
+        assert_eq!(decoded.attributes().source(), &source);
+        assert_eq!(decoded.attributes().sink(), Some(&sink));
+        assert_eq!(
+            decoded.attributes().traceparent(),
+            Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
+        );
+        assert_eq!(decoded.attributes().token(), Some("test-token"));
+        assert_eq!(decoded.encoding(), metadata.encoding());
     }
 }

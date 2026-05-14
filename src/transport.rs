@@ -33,16 +33,4 @@ impl UTransportIceoryx2 {
     fn build_publish_subscribe() -> Arc<Iceoryx2PubSub> {
         Iceoryx2PubSub::new()
     }
-
-    pub fn build_zero_copy(
-        messaging_pattern: MessagingPattern,
-    ) -> Result<Arc<Iceoryx2PubSub>, UStatus> {
-        match messaging_pattern {
-            MessagingPattern::PublishSubscribe => Ok(UTransportIceoryx2::build_publish_subscribe()),
-            _ => Err(UStatus::fail_with_code(
-                UCode::UNIMPLEMENTED,
-                "Unimplemented messaging pattern",
-            )),
-        }
-    }
 }

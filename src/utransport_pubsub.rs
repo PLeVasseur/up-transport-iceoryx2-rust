@@ -25,8 +25,8 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use up_rust::{
-    UCode, UFrameHeader, UOwnedFrame, UOwnedTransport, UStatus, UTxBuffer, UUri, UZeroCopyListener,
-    UZeroCopyRxFrame, UZeroCopyTransport,
+    UCode, UFrameMetadata, UOwnedFrame, UOwnedTransport, UStatus, UTxBuffer, UUri,
+    UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport,
 };
 
 use crate::workers::dispatcher::Iceoryx2WorkerDispatcher;
@@ -191,10 +191,10 @@ impl Iceoryx2PubSub {
                     let (payload_offset, payload_len) = sample
                         .user_header()
                         .payload_layout(sample.payload().len())?;
-                    let header = sample.user_header().frame_header(sample.payload())?;
+                    let metadata = sample.user_header().frame_metadata(sample.payload())?;
                     listener
                         .on_receive_zero_copy(Iceoryx2RxLease {
-                            header,
+                            metadata,
                             sample,
                             payload_offset,
                             payload_len,
@@ -215,19 +215,19 @@ impl Iceoryx2PubSub {
 }
 
 pub struct Iceoryx2TxLoan {
-    header: UFrameHeader,
+    metadata: UFrameMetadata,
     sample: IpcSampleMut,
     payload_offset: usize,
     payload_len: usize,
 }
 
 impl UTxBuffer for Iceoryx2TxLoan {
-    fn header(&self) -> &UFrameHeader {
-        &self.header
+    fn metadata(&self) -> &UFrameMetadata {
+        &self.metadata
     }
 
-    fn header_mut(&mut self) -> &mut UFrameHeader {
-        &mut self.header
+    fn metadata_mut(&mut self) -> &mut UFrameMetadata {
+        &mut self.metadata
     }
 
     fn payload(&self) -> &[u8] {
@@ -254,15 +254,15 @@ impl UTxBuffer for Iceoryx2TxLoan {
 }
 
 pub struct Iceoryx2RxLease {
-    header: UFrameHeader,
+    metadata: UFrameMetadata,
     sample: IpcSample,
     payload_offset: usize,
     payload_len: usize,
 }
 
 impl UZeroCopyRxFrame for Iceoryx2RxLease {
-    fn header(&self) -> &UFrameHeader {
-        &self.header
+    fn metadata(&self) -> &UFrameMetadata {
+        &self.metadata
     }
 
     fn payload(&self) -> &[u8] {
@@ -284,7 +284,7 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
 
     async fn reserve(
         &self,
-        header: UFrameHeader,
+        header: UFrameMetadata,
         payload_len: usize,
         alignment: usize,
     ) -> Result<Self::Tx, UStatus> {
@@ -310,14 +310,14 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
                 UStatus::fail_with_code(UCode::INTERNAL, "failed to access metadata prefix")
             })?
             .copy_from_slice(&metadata);
-        sample.user_header_mut().write_frame_header(
+        sample.user_header_mut().write_frame_metadata(
             &header,
             metadata_len,
             payload_len,
             alignment,
         )?;
         Ok(Iceoryx2TxLoan {
-            header,
+            metadata: header,
             sample,
             payload_offset: metadata_len,
             payload_len,
@@ -350,9 +350,9 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
         let (payload_offset, payload_len) = sample
             .user_header()
             .payload_layout(sample.payload().len())?;
-        let header = sample.user_header().frame_header(sample.payload())?;
+        let metadata = sample.user_header().frame_metadata(sample.payload())?;
         Ok(Iceoryx2RxLease {
-            header,
+            metadata,
             sample,
             payload_offset,
             payload_len,
@@ -411,7 +411,7 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
 impl UOwnedTransport for Iceoryx2PubSub {
     async fn send_owned(&self, frame: UOwnedFrame) -> Result<(), UStatus> {
         let mut loan = self
-            .reserve(frame.header().clone(), frame.payload().len(), 1)
+            .reserve(frame.metadata().clone(), frame.payload().len(), 1)
             .await?;
         loan.payload_mut().copy_from_slice(frame.payload().as_ref());
         self.send_zero_copy(loan).await
