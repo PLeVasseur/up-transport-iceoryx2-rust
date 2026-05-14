@@ -12,7 +12,7 @@
 // ################################################################################
 
 use iceoryx2::prelude::{MessagingPattern, ServiceName};
-use up_rust::{UCode, UMessageType, UStatus, UUri};
+use up_rust::{UCode, UStatus, UUri};
 
 fn encode_uuri_segments(uuri: &UUri) -> Vec<String> {
     vec![
@@ -39,76 +39,24 @@ fn get_authority_name(source_uuri: &UUri) -> String {
     }
 }
 
-fn determine_message_type(
-    source: &UUri,
-    _sink: Option<&UUri>,
-    messaging_pattern: MessagingPattern,
-) -> Result<UMessageType, UStatus> {
-    if is_a_publish(source, messaging_pattern) {
-        return Ok(UMessageType::UMESSAGE_TYPE_PUBLISH);
-    }
-
-    Err(UStatus::fail_with_code(
-        UCode::INVALID_ARGUMENT,
-        "Could not determine a valid UMessageType from the provided UUri(s)",
-    ))
-}
-
 fn is_a_publish(source: &UUri, messaging_pattern: MessagingPattern) -> bool {
     !source.is_empty() && messaging_pattern == MessagingPattern::PublishSubscribe
 }
 
 pub fn compute_service_name(
     source: &UUri,
-    sink: Option<&UUri>,
+    _sink: Option<&UUri>,
     messaging_pattern: MessagingPattern,
 ) -> Result<ServiceName, UStatus> {
     let join_segments = |segments: Vec<String>| segments.join("/");
-    let message_type = determine_message_type(source, sink, messaging_pattern)?;
-    let service_name_str = match message_type {
-        UMessageType::UMESSAGE_TYPE_REQUEST => {
-            let Some(sink_uri) = sink else {
-                return Err(UStatus::fail_with_code(
-                    UCode::INVALID_ARGUMENT,
-                    format!(
-                        "sink required for UMessageType {:?}",
-                        UMessageType::UMESSAGE_TYPE_REQUEST
-                    ),
-                ));
-            };
-            let segments = encode_uuri_segments(sink_uri);
-            format!("up/{}", join_segments(segments))
-        }
-        UMessageType::UMESSAGE_TYPE_RESPONSE | UMessageType::UMESSAGE_TYPE_NOTIFICATION => {
-            let Some(sink_uri) = sink else {
-                return Err(UStatus::fail_with_code(
-                    UCode::INVALID_ARGUMENT,
-                    format!(
-                        "sink required for UMessageType {:?} or {:?}",
-                        UMessageType::UMESSAGE_TYPE_RESPONSE,
-                        UMessageType::UMESSAGE_TYPE_NOTIFICATION
-                    ),
-                ));
-            };
-            let source_segments = encode_uuri_segments(source);
-            let sink_segments = encode_uuri_segments(sink_uri);
-            format!(
-                "up/{}/{}",
-                join_segments(source_segments),
-                join_segments(sink_segments)
-            )
-        }
-        UMessageType::UMESSAGE_TYPE_PUBLISH => {
-            let segments = encode_uuri_segments(source);
-            format!("up/{}", join_segments(segments))
-        }
-        _ => {
-            return Err(UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
-                "Unsupported UMessageType for service name computation",
-            ));
-        }
-    };
+    if !is_a_publish(source, messaging_pattern) {
+        return Err(UStatus::fail_with_code(
+            UCode::INVALID_ARGUMENT,
+            "iceoryx2 pub/sub service names require a non-empty publish source URI",
+        ));
+    }
+    let segments = encode_uuri_segments(source);
+    let service_name_str = format!("up/{}", join_segments(segments));
     Ok(ServiceName::new(service_name_str.as_str()).expect("Failed to create service name"))
 }
 
@@ -141,7 +89,7 @@ mod tests {
     // .specitem[dsn~up-attributes-response-source~1]
     // .specitem[dsn~up-attributes-notification-source~1]
     fn test_missing_uri_error() {
-        let uuri = UUri::new();
+        let uuri = UUri::default();
         let result = compute_service_name(&uuri, None, MessagingPattern::PublishSubscribe);
 
         assert!(result.is_err());
@@ -164,7 +112,7 @@ mod tests {
     // .specitem[dsn~up-attributes-response-source~1]
     // .specitem[dsn~up-attributes-notification-source~1]
     fn test_fail_missing_source_error() {
-        let uuri = UUri::new();
+        let uuri = UUri::default();
         let sink = test_uri("device1", 0x0004, 0x3AB, 0x3, 0x000);
         let result = compute_service_name(&uuri, Some(&sink), MessagingPattern::PublishSubscribe);
         assert!(result.is_err_and(|err| err.get_code() == UCode::INVALID_ARGUMENT));

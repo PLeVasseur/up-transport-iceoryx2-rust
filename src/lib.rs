@@ -17,13 +17,9 @@ use iceoryx2::{
     port::{publisher::Publisher, subscriber::Subscriber},
     prelude::{ServiceName, ZeroCopySend},
 };
-use std::{
-    collections::{HashMap, HashSet},
-    fmt::Debug,
-    sync::Arc,
-};
+use std::{collections::HashMap, fmt::Debug, sync::Arc};
 use tokio::sync::RwLock;
-use up_rust::ComparableListener;
+use up_rust::UZeroCopyListener;
 
 use crate::uprotocolheader::UProtocolHeader;
 
@@ -34,6 +30,7 @@ pub(crate) mod utransport_pubsub;
 pub(crate) mod workers;
 
 pub use iceoryx2::prelude::MessagingPattern;
+pub use utransport_pubsub::{Iceoryx2PubSub, Iceoryx2RxLease};
 
 pub trait BaseUserHeader: Debug + ZeroCopySend {}
 pub trait BasePayload: Debug + ZeroCopySend {}
@@ -42,4 +39,5 @@ pub(crate) type PublisherSet<Service> =
     RwLock<HashMap<ServiceName, Arc<Publisher<Service, [u8], UProtocolHeader>>>>;
 pub(crate) type SubscriberSet<Service> =
     RwLock<HashMap<ServiceName, Arc<Subscriber<Service, [u8], UProtocolHeader>>>>;
-pub(crate) type ListenerMap = RwLock<HashMap<ServiceName, HashSet<ComparableListener>>>;
+pub(crate) type ZeroCopyListenerMap =
+    RwLock<HashMap<ServiceName, Arc<dyn UZeroCopyListener<Iceoryx2RxLease>>>>;

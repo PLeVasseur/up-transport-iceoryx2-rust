@@ -15,12 +15,12 @@ use std::sync::Arc;
 
 use crate::utransport_pubsub::Iceoryx2PubSub;
 use iceoryx2::prelude::MessagingPattern;
-use up_rust::{UCode, UStatus, UTransport};
+use up_rust::{UCode, UStatus};
 
 pub struct UTransportIceoryx2 {}
 
 impl UTransportIceoryx2 {
-    pub fn build(messaging_pattern: MessagingPattern) -> Result<Arc<impl UTransport>, UStatus> {
+    pub fn build(messaging_pattern: MessagingPattern) -> Result<Arc<Iceoryx2PubSub>, UStatus> {
         match messaging_pattern {
             MessagingPattern::PublishSubscribe => Ok(UTransportIceoryx2::build_publish_subscribe()),
             _ => Err(UStatus::fail_with_code(
@@ -32,5 +32,17 @@ impl UTransportIceoryx2 {
 
     fn build_publish_subscribe() -> Arc<Iceoryx2PubSub> {
         Iceoryx2PubSub::new()
+    }
+
+    pub fn build_zero_copy(
+        messaging_pattern: MessagingPattern,
+    ) -> Result<Arc<Iceoryx2PubSub>, UStatus> {
+        match messaging_pattern {
+            MessagingPattern::PublishSubscribe => Ok(UTransportIceoryx2::build_publish_subscribe()),
+            _ => Err(UStatus::fail_with_code(
+                UCode::UNIMPLEMENTED,
+                "Unimplemented messaging pattern",
+            )),
+        }
     }
 }
