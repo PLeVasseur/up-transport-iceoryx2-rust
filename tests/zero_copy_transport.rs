@@ -233,7 +233,7 @@ async fn zero_copy_transport_preserves_native_frame_metadata()
     .with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
     .with_token("zero-copy-auth-token")
     .with_permission_level(9)
-    .with_commstatus(UCode::RESOURCE_EXHAUSTED);
+    .with_comm_status(UCode::RESOURCE_EXHAUSTED);
     let header = UFrameMetadata::new(attributes, TestReadingWire::encoding());
     let reading = TestReading {
         sensor_id: 12,

@@ -167,7 +167,7 @@ impl UProtocolHeader {
             let commstatus = UCode::from_u8(self.commstatus).ok_or_else(|| {
                 UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "invalid commstatus")
             })?;
-            attributes = attributes.with_commstatus(commstatus);
+            attributes = attributes.with_comm_status(commstatus);
         }
         if let Some(traceparent) = metadata.traceparent {
             attributes = attributes.with_traceparent(traceparent);
