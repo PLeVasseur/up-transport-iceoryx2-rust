@@ -29,13 +29,13 @@ fn encode_hex(value: u32) -> String {
 }
 
 fn get_authority_name(source_uuri: &UUri) -> String {
-    if source_uuri.authority_name.is_empty() {
+    if source_uuri.authority_name().is_empty() {
         match hostname::get().unwrap().into_string() {
             Ok(hostname) => hostname,
             Err(_) => "unknown".to_string(),
         }
     } else {
-        source_uuri.authority_name.clone()
+        source_uuri.authority_name()
     }
 }
 

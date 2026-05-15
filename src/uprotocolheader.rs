@@ -56,8 +56,8 @@ impl UProtocolHeader {
         payload_alignment: usize,
     ) -> Result<(), UStatus> {
         self.uprotocol_major_version = crate::UPROTOCOL_MAJOR_VERSION;
-        self.id_msb = header.attributes().id().msb;
-        self.id_lsb = header.attributes().id().lsb;
+        self.id_msb = header.attributes().id().msb();
+        self.id_lsb = header.attributes().id().lsb();
         self.message_type = message_type_to_byte(header.attributes().message_type());
         self.priority = priority_to_byte(header.attributes().priority());
         if let Some(ttl) = header.attributes().ttl() {
@@ -69,8 +69,8 @@ impl UProtocolHeader {
         }
         if let Some(request_id) = header.attributes().request_id() {
             self.request_id_present = 1;
-            self.request_id_msb = request_id.msb;
-            self.request_id_lsb = request_id.lsb;
+            self.request_id_msb = request_id.msb();
+            self.request_id_lsb = request_id.lsb();
         } else {
             self.request_id_present = 0;
             self.request_id_msb = 0;
@@ -99,14 +99,14 @@ impl UProtocolHeader {
         self.payload_alignment = u64::try_from(payload_alignment).map_err(|_| {
             UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "payload alignment exceeds u64")
         })?;
-        self.source_ue_id = header.attributes().source().ue_id;
-        self.source_ue_version_major = header.attributes().source().ue_version_major;
-        self.source_resource_id = header.attributes().source().resource_id;
+        self.source_ue_id = header.attributes().source().ue_id();
+        self.source_ue_version_major = header.attributes().source().ue_version_major();
+        self.source_resource_id = header.attributes().source().resource_id_raw();
         if let Some(sink) = header.attributes().sink() {
             self.sink_present = 1;
-            self.sink_ue_id = sink.ue_id;
-            self.sink_ue_version_major = sink.ue_version_major;
-            self.sink_resource_id = sink.resource_id;
+            self.sink_ue_id = sink.ue_id();
+            self.sink_ue_version_major = sink.ue_version_major();
+            self.sink_resource_id = sink.resource_id_raw();
         } else {
             self.sink_present = 0;
             self.sink_ue_id = 0;
@@ -212,11 +212,8 @@ impl UProtocolHeader {
 
 pub(crate) fn encode_frame_metadata(header: &UFrameMetadata) -> Result<Vec<u8>, UStatus> {
     FrameMetadata {
-        source_authority: header.attributes().source().authority_name.clone(),
-        sink_authority: header
-            .attributes()
-            .sink()
-            .map(|sink| sink.authority_name.clone()),
+        source_authority: header.attributes().source().authority_name(),
+        sink_authority: header.attributes().sink().map(|sink| sink.authority_name()),
         encoding: header.encoding().clone(),
         traceparent: header.attributes().traceparent().map(str::to_owned),
         token: header.attributes().token().map(str::to_owned),
@@ -283,12 +280,7 @@ fn read_uri_fields(
     ue_version_major: u32,
     resource_id: u32,
 ) -> Result<UUri, UStatus> {
-    let uri = UUri {
-        authority_name,
-        ue_id,
-        ue_version_major,
-        resource_id,
-    };
+    let uri = UUri::from_parts_unchecked(authority_name, ue_id, ue_version_major, resource_id);
     uri.check_validity()
         .map_err(|e| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, e.to_string()))?;
     Ok(uri)
