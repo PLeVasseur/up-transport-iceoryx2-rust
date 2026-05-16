@@ -33,7 +33,7 @@ use up_rust::{
 
 use crate::workers::dispatcher::Iceoryx2WorkerDispatcher;
 use crate::{
-    PublisherSet, SubscriberSet, ZeroCopyListenerMap,
+    PublisherSet, SubscriberSet, ZeroCopyListenerMap, ZeroCopyListenerRegistration,
     service_name_mapping::compute_service_name,
     uprotocolheader::{UProtocolHeader, encode_frame_metadata},
 };
@@ -178,13 +178,13 @@ impl Iceoryx2PubSub {
     pub async fn relay(&self) -> Result<(), UStatus> {
         let subscribers = self.subscribers.read().await;
         for (service_name, subscriber) in subscribers.iter() {
-            let zero_copy_listener = self
+            let zero_copy_listeners = self
                 .zero_copy_listeners
                 .read()
                 .await
                 .get(service_name)
                 .cloned();
-            let Some(listener) = zero_copy_listener else {
+            let Some(listeners) = zero_copy_listeners else {
                 continue;
             };
 
@@ -195,6 +195,23 @@ impl Iceoryx2PubSub {
                         .payload_layout(sample.payload().len())?;
                     let metadata = sample.user_header().frame_metadata(sample.payload())?;
                     validate_frame_metadata_for_payload(&metadata, metadata.encoding().is_some())?;
+                    validate_payload_alignment(
+                        sample.user_header(),
+                        sample.payload(),
+                        payload_offset,
+                    )?;
+                    let Some(listener) = listeners
+                        .iter()
+                        .find(|registration| {
+                            sink_matches(
+                                metadata.attributes().sink(),
+                                registration.sink_filter.as_ref(),
+                            )
+                        })
+                        .map(|registration| registration.listener.clone())
+                    else {
+                        continue;
+                    };
                     listener
                         .on_receive_zero_copy(Iceoryx2RxLease {
                             metadata,
@@ -291,6 +308,7 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
         payload_len: usize,
         alignment: usize,
     ) -> Result<Self::Tx, UStatus> {
+        validate_alignment(alignment)?;
         if header.encoding().is_none() && payload_len != 0 {
             return Err(UStatus::fail_with_code(
                 UCode::INVALID_ARGUMENT,
@@ -306,12 +324,31 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
         )?;
         let metadata = encode_frame_metadata(&header)?;
         let metadata_len = metadata.len();
-        let sample_len = metadata_len.checked_add(payload_len).ok_or_else(|| {
+        let publisher = self.get_or_create_publisher(service_name).await?;
+        let mut sample_len = metadata_len.checked_add(payload_len).ok_or_else(|| {
             UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "sample length overflow")
         })?;
-        let publisher = self.get_or_create_publisher(service_name).await?;
-        let mut sample = publisher.loan_slice(sample_len).map_err(|e| {
-            UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to loan sample: {e}"))
+        let mut aligned_loan = None;
+        for _ in 0..8 {
+            let sample = publisher.loan_slice(sample_len).map_err(|e| {
+                UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to loan sample: {e}"))
+            })?;
+            let payload_offset = aligned_payload_offset(
+                sample.payload().as_ptr() as usize,
+                metadata_len,
+                alignment,
+            )?;
+            let aligned_sample_len = payload_offset.checked_add(payload_len).ok_or_else(|| {
+                UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "sample length overflow")
+            })?;
+            if aligned_sample_len == sample.payload().len() {
+                aligned_loan = Some((sample, payload_offset));
+                break;
+            }
+            sample_len = aligned_sample_len;
+        }
+        let (mut sample, payload_offset) = aligned_loan.ok_or_else(|| {
+            UStatus::fail_with_code(UCode::INTERNAL, "failed to reserve aligned payload loan")
         })?;
         sample
             .payload_mut()
@@ -323,13 +360,14 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
         sample.user_header_mut().write_frame_metadata(
             &header,
             metadata_len,
+            payload_offset,
             payload_len,
             alignment,
         )?;
         Ok(Iceoryx2TxLoan {
             metadata: header,
             sample,
-            payload_offset: metadata_len,
+            payload_offset,
             payload_len,
         })
     }
@@ -353,21 +391,27 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
             MessagingPattern::PublishSubscribe,
         )?;
         let subscriber = self.get_or_create_subscriber(service_name).await?;
-        let sample = subscriber
-            .receive()
-            .map_err(|e| UStatus::fail_with_code(UCode::INTERNAL, e.to_string()))?
-            .ok_or_else(|| UStatus::fail_with_code(UCode::NOT_FOUND, "no sample available"))?;
-        let (payload_offset, payload_len) = sample
-            .user_header()
-            .payload_layout(sample.payload().len())?;
-        let metadata = sample.user_header().frame_metadata(sample.payload())?;
-        validate_frame_metadata_for_payload(&metadata, metadata.encoding().is_some())?;
-        Ok(Iceoryx2RxLease {
-            metadata,
-            sample,
-            payload_offset,
-            payload_len,
-        })
+        loop {
+            let sample = subscriber
+                .receive()
+                .map_err(|e| UStatus::fail_with_code(UCode::INTERNAL, e.to_string()))?
+                .ok_or_else(|| UStatus::fail_with_code(UCode::NOT_FOUND, "no sample available"))?;
+            let (payload_offset, payload_len) = sample
+                .user_header()
+                .payload_layout(sample.payload().len())?;
+            let metadata = sample.user_header().frame_metadata(sample.payload())?;
+            validate_frame_metadata_for_payload(&metadata, metadata.encoding().is_some())?;
+            validate_payload_alignment(sample.user_header(), sample.payload(), payload_offset)?;
+            if !sink_matches(metadata.attributes().sink(), sink_filter) {
+                continue;
+            }
+            return Ok(Iceoryx2RxLease {
+                metadata,
+                sample,
+                payload_offset,
+                payload_len,
+            });
+        }
     }
 
     async fn register_zero_copy_listener(
@@ -383,14 +427,21 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
             MessagingPattern::PublishSubscribe,
         )?;
         self.get_or_create_subscriber(service_name.clone()).await?;
-        let mut listeners = self.zero_copy_listeners.write().await;
-        if listeners.contains_key(&service_name) {
+        let mut listeners_by_service = self.zero_copy_listeners.write().await;
+        let listeners = listeners_by_service.entry(service_name).or_default();
+        if listeners
+            .iter()
+            .any(|registration| registration.sink_filter.as_ref() == sink_filter)
+        {
             return Err(UStatus::fail_with_code(
                 UCode::ALREADY_EXISTS,
-                "zero-copy listener already registered for service",
+                "zero-copy listener already registered for filter",
             ));
         }
-        listeners.insert(service_name, listener);
+        listeners.push(ZeroCopyListenerRegistration {
+            sink_filter: sink_filter.cloned(),
+            listener,
+        });
         Ok(())
     }
 
@@ -406,16 +457,70 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
             sink_filter,
             MessagingPattern::PublishSubscribe,
         )?;
-        let mut listeners = self.zero_copy_listeners.write().await;
-        if listeners
-            .get(&service_name)
-            .is_some_and(|existing| Arc::ptr_eq(existing, &listener))
-        {
-            listeners.remove(&service_name);
-            self.subscribers.write().await.remove(&service_name);
+        let mut listeners_by_service = self.zero_copy_listeners.write().await;
+        if let Some(listeners) = listeners_by_service.get_mut(&service_name) {
+            listeners.retain(|registration| {
+                registration.sink_filter.as_ref() != sink_filter
+                    || !Arc::ptr_eq(&registration.listener, &listener)
+            });
+            if listeners.is_empty() {
+                listeners_by_service.remove(&service_name);
+                self.subscribers.write().await.remove(&service_name);
+            }
         }
         Ok(())
     }
+}
+
+fn validate_alignment(alignment: usize) -> Result<(), UStatus> {
+    if alignment == 0 || !alignment.is_power_of_two() {
+        return Err(UStatus::fail_with_code(
+            UCode::INVALID_ARGUMENT,
+            "payload alignment must be a non-zero power of two",
+        ));
+    }
+    Ok(())
+}
+
+fn aligned_payload_offset(
+    payload_base: usize,
+    metadata_len: usize,
+    alignment: usize,
+) -> Result<usize, UStatus> {
+    let payload_start = payload_base.checked_add(metadata_len).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "payload address overflow")
+    })?;
+    let padding = (alignment - (payload_start & (alignment - 1))) & (alignment - 1);
+    metadata_len
+        .checked_add(padding)
+        .ok_or_else(|| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "payload offset overflow"))
+}
+
+fn validate_payload_alignment(
+    header: &UProtocolHeader,
+    sample_payload: &[u8],
+    payload_offset: usize,
+) -> Result<(), UStatus> {
+    let alignment = usize::try_from(header.payload_alignment).map_err(|_| {
+        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "payload alignment exceeds usize")
+    })?;
+    validate_alignment(alignment)?;
+    let payload_address = (sample_payload.as_ptr() as usize)
+        .checked_add(payload_offset)
+        .ok_or_else(|| {
+            UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "payload address overflow")
+        })?;
+    if payload_address & (alignment - 1) != 0 {
+        return Err(UStatus::fail_with_code(
+            UCode::INVALID_ARGUMENT,
+            "payload offset does not satisfy requested alignment",
+        ));
+    }
+    Ok(())
+}
+
+fn sink_matches(actual: Option<&UUri>, filter: Option<&UUri>) -> bool {
+    filter.is_none_or(|filter| actual.is_some_and(|actual| filter.matches(actual)))
 }
 
 #[async_trait]

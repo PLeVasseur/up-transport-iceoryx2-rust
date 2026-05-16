@@ -19,7 +19,9 @@ use up_rust::{
     ProtobufWire, UAttributes, UCode, UEncoding, UFrameMetadata, UMessageType, UPriority, UUID,
     UUri,
     wire::{UDeserializer, USerializer, UWireError, WireFormat},
-    zero_copy::{UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport, UZeroCopyTransportExt},
+    zero_copy::{
+        UTxBuffer, UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport, UZeroCopyTransportExt,
+    },
 };
 use up_transport_iceoryx2_rust::{
     Iceoryx2PubSub, Iceoryx2RxLease, MessagingPattern, transport::UTransportIceoryx2,
@@ -32,6 +34,8 @@ struct TestReading {
 }
 
 struct TestReadingWire;
+
+struct AlignedTestReadingWire;
 
 impl WireFormat for TestReadingWire {
     fn name() -> &'static str {
@@ -47,13 +51,27 @@ impl WireFormat for TestReadingWire {
     }
 }
 
+impl WireFormat for AlignedTestReadingWire {
+    fn name() -> &'static str {
+        "aligned-test-reading-v1"
+    }
+
+    fn encoding() -> UEncoding {
+        UEncoding::new(
+            Self::name(),
+            "application/x.up-test-reading",
+            Some("urn:uprotocol:test:reading:aligned:v1"),
+        )
+    }
+}
+
 impl USerializer<TestReadingWire> for TestReading {
     fn encoded_len(&self) -> usize {
         6
     }
 
     fn serialize_into(&self, dst: &mut [u8]) -> Result<usize, UWireError> {
-        let expected = self.encoded_len();
+        let expected = <Self as USerializer<TestReadingWire>>::encoded_len(self);
         let actual = dst.len();
         if actual < expected {
             return Err(UWireError::buffer_too_small(expected, actual));
@@ -67,6 +85,18 @@ impl USerializer<TestReadingWire> for TestReading {
             .ok_or_else(|| UWireError::buffer_too_small(expected, actual))?;
         counter.copy_from_slice(&self.counter.to_be_bytes());
         Ok(expected)
+    }
+}
+
+impl USerializer<AlignedTestReadingWire> for TestReading {
+    const ALIGNMENT: usize = 64;
+
+    fn encoded_len(&self) -> usize {
+        6
+    }
+
+    fn serialize_into(&self, dst: &mut [u8]) -> Result<usize, UWireError> {
+        <Self as USerializer<TestReadingWire>>::serialize_into(self, dst)
     }
 }
 
@@ -210,6 +240,51 @@ async fn zero_copy_transport_round_trips_protobuf_wire_format()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_reserve_honors_payload_alignment() -> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-align-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9010)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+
+    let _ = subscriber.receive_zero_copy(&topic, None).await;
+
+    let reading = TestReading {
+        sensor_id: 10,
+        counter: 64,
+    };
+    let mut loan = publisher
+        .reserve(
+            UFrameMetadata::publish(topic.clone())
+                .with_encoding(AlignedTestReadingWire::encoding()),
+            <TestReading as USerializer<AlignedTestReadingWire>>::encoded_len(&reading),
+            <TestReading as USerializer<AlignedTestReadingWire>>::ALIGNMENT,
+        )
+        .await?;
+    assert_eq!(loan.payload_mut().as_ptr() as usize % 64, 0);
+    <TestReading as USerializer<AlignedTestReadingWire>>::serialize_into(
+        &reading,
+        loan.payload_mut(),
+    )?;
+    publisher.send_zero_copy(loan).await?;
+
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&topic, None).await {
+            Ok(rx) => {
+                assert_eq!(rx.payload().as_ptr() as usize % 64, 0);
+                assert_eq!(rx.payload(), &[0, 10, 0, 0, 0, 64]);
+                return Ok(());
+            }
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+
+    Err("timed out waiting for an aligned zero-copy sample".into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_transport_preserves_native_frame_metadata()
 -> Result<(), Box<dyn std::error::Error>> {
     let authority = format!("iox-metadata-test-{}", std::process::id());
@@ -285,6 +360,47 @@ async fn zero_copy_transport_preserves_native_frame_metadata()
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_receive_filters_mismatched_sink() -> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-sink-filter-test-{}", std::process::id());
+    let source = UUri::try_from_parts(&authority, 0x4210, 1, 0x9011)?;
+    let sink_a = UUri::try_from_parts(&authority, 0x4211, 1, 0)?;
+    let sink_b = UUri::try_from_parts(&authority, 0x4212, 1, 0)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+
+    let _ = subscriber.receive_zero_copy(&source, Some(&sink_a)).await;
+
+    let header = UFrameMetadata::new(
+        UAttributes::new(
+            UUID::build(),
+            source.clone(),
+            Some(sink_b),
+            UMessageType::Notification,
+        ),
+        TestReadingWire::encoding(),
+    );
+    publisher
+        .send_serialized_zero_copy::<TestReadingWire, _>(
+            header,
+            &TestReading {
+                sensor_id: 1,
+                counter: 2,
+            },
+        )
+        .await?;
+
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&source, Some(&sink_a)).await {
+            Err(status) if status.get_code() == UCode::NOT_FOUND => return Ok(()),
+            Err(status) => return Err(status.into()),
+            Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+
+    Err("sink A receive delivered a sink B sample".into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_listener_round_trips_custom_wire_format()
 -> Result<(), Box<dyn std::error::Error>> {
     let authority = format!("iox-listener-test-{}", std::process::id());
@@ -324,6 +440,49 @@ async fn zero_copy_listener_round_trips_custom_wire_format()
 
     assert_eq!(encoding, Some(TestReadingWire::encoding()));
     assert_eq!(decoded, reading);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_listener_filters_mismatched_sink() -> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-listener-sink-filter-test-{}", std::process::id());
+    let source = UUri::try_from_parts(&authority, 0x4210, 1, 0x9012)?;
+    let sink_a = UUri::try_from_parts(&authority, 0x4211, 1, 0)?;
+    let sink_b = UUri::try_from_parts(&authority, 0x4212, 1, 0)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let listener: Arc<dyn UZeroCopyListener<Iceoryx2RxLease>> = Arc::new(LeaseSender(tx));
+
+    subscriber
+        .register_zero_copy_listener(&source, Some(&sink_a), listener)
+        .await?;
+
+    let header = UFrameMetadata::new(
+        UAttributes::new(
+            UUID::build(),
+            source,
+            Some(sink_b),
+            UMessageType::Notification,
+        ),
+        TestReadingWire::encoding(),
+    );
+    publisher
+        .send_serialized_zero_copy::<TestReadingWire, _>(
+            header,
+            &TestReading {
+                sensor_id: 3,
+                counter: 4,
+            },
+        )
+        .await?;
+
+    assert!(
+        tokio::time::timeout(Duration::from_secs(1), rx.recv())
+            .await
+            .is_err(),
+        "sink A listener delivered a sink B sample"
+    );
     Ok(())
 }
 

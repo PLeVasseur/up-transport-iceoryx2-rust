@@ -19,7 +19,7 @@ use iceoryx2::{
 };
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 use tokio::sync::RwLock;
-use up_rust::zero_copy::UZeroCopyListener;
+use up_rust::{UUri, zero_copy::UZeroCopyListener};
 
 use crate::uprotocolheader::UProtocolHeader;
 
@@ -39,5 +39,11 @@ pub(crate) type PublisherSet<Service> =
     RwLock<HashMap<ServiceName, Arc<Publisher<Service, [u8], UProtocolHeader>>>>;
 pub(crate) type SubscriberSet<Service> =
     RwLock<HashMap<ServiceName, Arc<Subscriber<Service, [u8], UProtocolHeader>>>>;
+#[derive(Clone)]
+pub struct ZeroCopyListenerRegistration {
+    pub(crate) sink_filter: Option<UUri>,
+    pub(crate) listener: Arc<dyn UZeroCopyListener<Iceoryx2RxLease>>,
+}
+
 pub(crate) type ZeroCopyListenerMap =
-    RwLock<HashMap<ServiceName, Arc<dyn UZeroCopyListener<Iceoryx2RxLease>>>>;
+    RwLock<HashMap<ServiceName, Vec<ZeroCopyListenerRegistration>>>;

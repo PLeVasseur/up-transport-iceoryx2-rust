@@ -43,6 +43,7 @@ pub struct UProtocolHeader {
     pub(crate) sink_ue_version_major: u32,
     pub(crate) sink_resource_id: u32,
     pub(crate) metadata_len: u64,
+    pub(crate) payload_offset: u64,
     pub(crate) payload_len: u64,
     pub(crate) payload_alignment: u64,
 }
@@ -52,6 +53,7 @@ impl UProtocolHeader {
         &mut self,
         header: &UFrameMetadata,
         metadata_len: usize,
+        payload_offset: usize,
         payload_len: usize,
         payload_alignment: usize,
     ) -> Result<(), UStatus> {
@@ -93,6 +95,9 @@ impl UProtocolHeader {
         self.metadata_len = u64::try_from(metadata_len).map_err(|_| {
             UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "metadata length exceeds u64")
         })?;
+        self.payload_offset = u64::try_from(payload_offset).map_err(|_| {
+            UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "payload offset exceeds u64")
+        })?;
         self.payload_len = u64::try_from(payload_len).map_err(|_| {
             UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "payload length exceeds u64")
         })?;
@@ -117,6 +122,12 @@ impl UProtocolHeader {
     }
 
     pub(crate) fn frame_metadata(&self, sample_payload: &[u8]) -> Result<UFrameMetadata, UStatus> {
+        if self.uprotocol_major_version != crate::UPROTOCOL_MAJOR_VERSION {
+            return Err(UStatus::fail_with_code(
+                UCode::INVALID_ARGUMENT,
+                "unsupported uProtocol major version",
+            ));
+        }
         let id = UUID::from_u64_pair(self.id_msb, self.id_lsb).map_err(|e| {
             UStatus::fail_with_code(UCode::INVALID_ARGUMENT, format!("invalid UUID: {e}"))
         })?;
@@ -191,21 +202,39 @@ impl UProtocolHeader {
         let metadata_len = usize::try_from(self.metadata_len).map_err(|_| {
             UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "metadata length exceeds usize")
         })?;
+        let payload_offset = usize::try_from(self.payload_offset).map_err(|_| {
+            UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "payload offset exceeds usize")
+        })?;
         let payload_len = usize::try_from(self.payload_len).map_err(|_| {
             UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "payload length exceeds usize")
         })?;
-        let total_len = metadata_len.checked_add(payload_len).ok_or_else(|| {
+        let payload_alignment = usize::try_from(self.payload_alignment).map_err(|_| {
+            UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "payload alignment exceeds usize")
+        })?;
+        if payload_alignment == 0 || !payload_alignment.is_power_of_two() {
+            return Err(UStatus::fail_with_code(
+                UCode::INVALID_ARGUMENT,
+                "payload alignment must be a non-zero power of two",
+            ));
+        }
+        if payload_offset < metadata_len {
+            return Err(UStatus::fail_with_code(
+                UCode::INVALID_ARGUMENT,
+                "payload offset precedes metadata",
+            ));
+        }
+        let total_len = payload_offset.checked_add(payload_len).ok_or_else(|| {
             UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "sample payload length overflow")
         })?;
-        if total_len > sample_payload_len {
+        if total_len != sample_payload_len {
             return Err(UStatus::fail_with_code(
                 UCode::INVALID_ARGUMENT,
                 format!(
-                    "sample payload too small for metadata and payload: {sample_payload_len} < {total_len}"
+                    "sample payload length does not match metadata layout: {sample_payload_len} != {total_len}"
                 ),
             ));
         }
-        Ok((metadata_len, payload_len))
+        Ok((payload_offset, payload_len))
     }
 
     fn metadata<'a>(&self, sample_payload: &'a [u8]) -> Result<&'a [u8], UStatus> {
@@ -462,7 +491,7 @@ mod tests {
         let mut user_header = UProtocolHeader::default();
 
         user_header
-            .write_frame_metadata(&metadata, prefix.len(), 0, 1)
+            .write_frame_metadata(&metadata, prefix.len(), prefix.len(), 0, 1)
             .unwrap();
 
         let decoded = user_header.frame_metadata(&prefix).unwrap();
@@ -501,7 +530,7 @@ mod tests {
         let prefix = encode_frame_metadata(&metadata).unwrap();
         let mut user_header = UProtocolHeader::default();
         user_header
-            .write_frame_metadata(&metadata, prefix.len(), 0, 1)
+            .write_frame_metadata(&metadata, prefix.len(), prefix.len(), 0, 1)
             .unwrap();
 
         let decoded = user_header.frame_metadata(&prefix).unwrap();
@@ -524,7 +553,7 @@ mod tests {
         let prefix = encode_frame_metadata(&metadata).unwrap();
         let mut user_header = UProtocolHeader::default();
         user_header
-            .write_frame_metadata(&metadata, prefix.len(), 0, 1)
+            .write_frame_metadata(&metadata, prefix.len(), prefix.len(), 0, 1)
             .unwrap();
 
         let decoded = user_header.frame_metadata(&prefix).unwrap();
