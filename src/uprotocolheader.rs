@@ -437,4 +437,83 @@ mod tests {
         assert_eq!(decoded.attributes().token(), Some("test-token"));
         assert_eq!(decoded.encoding(), metadata.encoding());
     }
+
+    #[test]
+    fn frame_metadata_round_trips_all_native_fields() {
+        let source = UUri::try_from_parts("vehicle", 0xA8000, 2, 0x8001).unwrap();
+        let sink = UUri::try_from_parts("service", 0xB8000, 1, 0).unwrap();
+        let request_id = UUID::build();
+        let attributes =
+            UAttributes::new(UUID::build(), source, Some(sink), UMessageType::Response)
+                .with_priority(UPriority::CS5)
+                .with_ttl(3_601)
+                .with_request_id(request_id)
+                .with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
+                .with_token("token")
+                .with_permission_level(7)
+                .with_comm_status(UCode::UNAVAILABLE);
+        let metadata = UFrameMetadata::new(
+            attributes,
+            UEncoding::new(
+                "custom-json",
+                "application/custom+json",
+                Some("schema://example/type"),
+            ),
+        );
+        let prefix = encode_frame_metadata(&metadata).unwrap();
+        let mut user_header = UProtocolHeader::default();
+        user_header
+            .write_frame_metadata(&metadata, prefix.len(), 0, 1)
+            .unwrap();
+
+        let decoded = user_header.frame_metadata(&prefix).unwrap();
+
+        assert_eq!(decoded, metadata);
+    }
+
+    #[test]
+    fn frame_metadata_preserves_expired_ttl_for_delivery_layer() {
+        let expired_id = UUID::from_u64_pair(0x018D_548E_A8E0_7000, 0x8000_0000_0000_0000)
+            .expect("valid expired UUID");
+        let source = UUri::try_from_parts("vehicle", 0xA8000, 2, 0x8001).unwrap();
+        let attributes = UAttributes::new(expired_id, source, None, UMessageType::Publish)
+            .with_priority(UPriority::CS1)
+            .with_ttl(1);
+        let metadata = UFrameMetadata::new(
+            attributes,
+            UEncoding::without_schema_ref("raw-bytes", "application/octet-stream"),
+        );
+        let prefix = encode_frame_metadata(&metadata).unwrap();
+        let mut user_header = UProtocolHeader::default();
+        user_header
+            .write_frame_metadata(&metadata, prefix.len(), 0, 1)
+            .unwrap();
+
+        let decoded = user_header.frame_metadata(&prefix).unwrap();
+
+        assert!(decoded.attributes().is_expired());
+    }
+
+    #[test]
+    fn frame_metadata_rejects_malformed_prefix() {
+        let Err(error) = FrameMetadata::decode(b"BAD!") else {
+            panic!("malformed prefix should be rejected");
+        };
+
+        assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT);
+    }
+
+    #[test]
+    fn frame_metadata_rejects_trailing_prefix_bytes() {
+        let metadata =
+            UFrameMetadata::publish(UUri::try_from_parts("vehicle", 0xA8000, 2, 0x8001).unwrap());
+        let mut prefix = encode_frame_metadata(&metadata).unwrap();
+        prefix.push(0xff);
+
+        let Err(error) = FrameMetadata::decode(&prefix) else {
+            panic!("trailing prefix bytes should be rejected");
+        };
+
+        assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT);
+    }
 }
