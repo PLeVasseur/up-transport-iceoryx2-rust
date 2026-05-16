@@ -19,7 +19,7 @@ use iceoryx2::{
 };
 use std::{collections::HashMap, fmt::Debug, sync::Arc};
 use tokio::sync::RwLock;
-use up_rust::UZeroCopyListener;
+use up_rust::zero_copy::UZeroCopyListener;
 
 use crate::uprotocolheader::UProtocolHeader;
 

@@ -122,6 +122,12 @@ impl UProtocolHeader {
         })?;
         let metadata = self.metadata(sample_payload)?;
         let metadata = FrameMetadata::decode(metadata)?;
+        if metadata.encoding.is_none() && self.payload_len != 0 {
+            return Err(UStatus::fail_with_code(
+                UCode::INVALID_ARGUMENT,
+                "sample payload is present but payload encoding is absent",
+            ));
+        }
         let source = read_uri_fields(
             metadata.source_authority,
             self.source_ue_id,
@@ -214,7 +220,7 @@ pub(crate) fn encode_frame_metadata(header: &UFrameMetadata) -> Result<Vec<u8>, 
     FrameMetadata {
         source_authority: header.attributes().source().authority_name(),
         sink_authority: header.attributes().sink().map(|sink| sink.authority_name()),
-        encoding: header.encoding().clone(),
+        encoding: header.encoding().cloned(),
         traceparent: header.attributes().traceparent().map(str::to_owned),
         token: header.attributes().token().map(str::to_owned),
     }
@@ -224,7 +230,7 @@ pub(crate) fn encode_frame_metadata(header: &UFrameMetadata) -> Result<Vec<u8>, 
 struct FrameMetadata {
     source_authority: String,
     sink_authority: Option<String>,
-    encoding: UEncoding,
+    encoding: Option<UEncoding>,
     traceparent: Option<String>,
     token: Option<String>,
 }
@@ -235,9 +241,7 @@ impl FrameMetadata {
         bytes.extend_from_slice(FRAME_METADATA_MAGIC);
         write_string(&mut bytes, &self.source_authority)?;
         write_optional_string(&mut bytes, self.sink_authority.as_deref())?;
-        write_string(&mut bytes, self.encoding.format_id())?;
-        write_string(&mut bytes, self.encoding.content_type())?;
-        write_optional_string(&mut bytes, self.encoding.schema_ref())?;
+        write_optional_encoding(&mut bytes, self.encoding.as_ref())?;
         write_optional_string(&mut bytes, self.traceparent.as_deref())?;
         write_optional_string(&mut bytes, self.token.as_deref())?;
         Ok(bytes)
@@ -253,9 +257,7 @@ impl FrameMetadata {
         }
         let source_authority = read_string(&mut bytes)?;
         let sink_authority = read_optional_string(&mut bytes)?;
-        let format_id = read_string(&mut bytes)?;
-        let content_type = read_string(&mut bytes)?;
-        let schema_ref = read_optional_string(&mut bytes)?;
+        let encoding = read_optional_encoding(&mut bytes)?;
         let traceparent = read_optional_string(&mut bytes)?;
         let token = read_optional_string(&mut bytes)?;
         if !bytes.is_empty() {
@@ -267,11 +269,24 @@ impl FrameMetadata {
         Ok(Self {
             source_authority,
             sink_authority,
-            encoding: UEncoding::new(format_id, content_type, schema_ref),
+            encoding,
             traceparent,
             token,
         })
     }
+}
+
+fn write_optional_encoding(dst: &mut Vec<u8>, value: Option<&UEncoding>) -> Result<(), UStatus> {
+    match value {
+        Some(value) => {
+            dst.push(1);
+            write_string(dst, value.format_id())?;
+            write_string(dst, value.content_type())?;
+            write_optional_string(dst, value.schema_ref())?;
+        }
+        None => dst.push(0),
+    }
+    Ok(())
 }
 
 fn read_uri_fields(
@@ -325,6 +340,29 @@ fn read_optional_string(src: &mut &[u8]) -> Result<Option<String>, UStatus> {
     match read_u8(src)? {
         0 => Ok(None),
         1 => Ok(Some(read_string(src)?)),
+        _ => Err(UStatus::fail_with_code(
+            UCode::INVALID_ARGUMENT,
+            "invalid optional metadata field",
+        )),
+    }
+}
+
+fn read_optional_encoding(src: &mut &[u8]) -> Result<Option<UEncoding>, UStatus> {
+    match read_u8(src)? {
+        0 => Ok(None),
+        1 => {
+            let format_id = read_string(src)?;
+            let content_type = read_string(src)?;
+            let schema_ref = read_optional_string(src)?;
+            UEncoding::try_new(format_id, content_type, schema_ref)
+                .map(Some)
+                .map_err(|err| {
+                    UStatus::fail_with_code(
+                        UCode::INVALID_ARGUMENT,
+                        format!("invalid payload encoding metadata: {err}"),
+                    )
+                })
+        }
         _ => Err(UStatus::fail_with_code(
             UCode::INVALID_ARGUMENT,
             "invalid optional metadata field",

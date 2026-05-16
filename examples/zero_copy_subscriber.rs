@@ -13,7 +13,11 @@
 
 use std::str::FromStr;
 
-use up_rust::{RawBytes, UCode, UUri, UZeroCopyRxFrame, UZeroCopyTransport};
+use up_rust::{
+    UCode, UUri,
+    wire::RawBytes,
+    zero_copy::{UZeroCopyRxFrame, UZeroCopyTransport},
+};
 use up_transport_iceoryx2_rust::{MessagingPattern, transport::UTransportIceoryx2};
 
 #[tokio::main(flavor = "multi_thread")]

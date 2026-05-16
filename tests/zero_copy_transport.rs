@@ -16,9 +16,10 @@ use std::sync::Arc;
 use protobuf::well_known_types::wrappers::StringValue;
 use tokio::{sync::mpsc, time::Duration};
 use up_rust::{
-    ProtobufWire, UAttributes, UCode, UDeserializer, UEncoding, UFrameMetadata, UMessageType,
-    UPriority, USerializer, UUID, UUri, UWireError, UZeroCopyListener, UZeroCopyRxFrame,
-    UZeroCopyTransport, UZeroCopyTransportExt, WireFormat,
+    ProtobufWire, UAttributes, UCode, UEncoding, UFrameMetadata, UMessageType, UPriority, UUID,
+    UUri,
+    wire::{UDeserializer, USerializer, UWireError, WireFormat},
+    zero_copy::{UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport, UZeroCopyTransportExt},
 };
 use up_transport_iceoryx2_rust::{
     Iceoryx2PubSub, Iceoryx2RxLease, MessagingPattern, transport::UTransportIceoryx2,
@@ -94,12 +95,12 @@ impl<'a> UDeserializer<'a, TestReadingWire> for TestReading {
     }
 }
 
-struct LeaseSender(mpsc::UnboundedSender<(UEncoding, TestReading)>);
+struct LeaseSender(mpsc::UnboundedSender<(Option<UEncoding>, TestReading)>);
 
 #[async_trait::async_trait]
 impl UZeroCopyListener<Iceoryx2RxLease> for LeaseSender {
     async fn on_receive_zero_copy(&self, frame: Iceoryx2RxLease) {
-        let encoding = frame.metadata().encoding().clone();
+        let encoding = frame.metadata().encoding().cloned();
         let reading = frame
             .deserialize_borrowed::<TestReadingWire, TestReading>()
             .expect("failed to deserialize zero-copy payload");
@@ -142,7 +143,7 @@ async fn zero_copy_transport_round_trips_custom_wire_format()
     for _ in 0..100 {
         match subscriber.receive_zero_copy(&topic, None).await {
             Ok(rx) => {
-                assert_eq!(rx.metadata().encoding(), &TestReadingWire::encoding());
+                assert_eq!(rx.metadata().encoding(), Some(&TestReadingWire::encoding()));
                 assert_eq!(
                     rx.deserialize_borrowed::<TestReadingWire, TestReading>()?,
                     reading
@@ -191,7 +192,7 @@ async fn zero_copy_transport_round_trips_protobuf_wire_format()
     for _ in 0..100 {
         match subscriber.receive_zero_copy(&topic, None).await {
             Ok(rx) => {
-                assert_eq!(rx.metadata().encoding(), &ProtobufWire::encoding());
+                assert_eq!(rx.metadata().encoding(), Some(&ProtobufWire::encoding()));
                 let decoded: StringValue = rx.deserialize_borrowed::<ProtobufWire, _>()?;
                 assert_eq!(decoded.value, payload.value);
                 sender.abort();
@@ -220,7 +221,6 @@ async fn zero_copy_transport_preserves_native_frame_metadata()
     let _ = subscriber.receive_zero_copy(&source, Some(&sink)).await;
 
     let id = UUID::build();
-    let request_id = UUID::build();
     let attributes = UAttributes::new(
         id.clone(),
         source.clone(),
@@ -229,11 +229,7 @@ async fn zero_copy_transport_preserves_native_frame_metadata()
     )
     .with_priority(UPriority::CS6)
     .with_ttl(6_000)
-    .with_request_id(request_id.clone())
-    .with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
-    .with_token("zero-copy-auth-token")
-    .with_permission_level(9)
-    .with_comm_status(UCode::RESOURCE_EXHAUSTED);
+    .with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00");
     let header = UFrameMetadata::new(attributes, TestReadingWire::encoding());
     let reading = TestReading {
         sensor_id: 12,
@@ -261,15 +257,15 @@ async fn zero_copy_transport_preserves_native_frame_metadata()
                 assert_eq!(received.message_type(), UMessageType::Notification);
                 assert_eq!(received.priority(), UPriority::CS6);
                 assert_eq!(received.ttl(), Some(6_000));
-                assert_eq!(received.request_id(), Some(&request_id));
+                assert_eq!(received.request_id(), None);
                 assert_eq!(
                     received.traceparent(),
                     Some("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
                 );
-                assert_eq!(received.token(), Some("zero-copy-auth-token"));
-                assert_eq!(received.permission_level(), Some(9));
-                assert_eq!(received.commstatus(), Some(UCode::RESOURCE_EXHAUSTED));
-                assert_eq!(rx.metadata().encoding(), &TestReadingWire::encoding());
+                assert_eq!(received.token(), None);
+                assert_eq!(received.permission_level(), None);
+                assert_eq!(received.commstatus(), None);
+                assert_eq!(rx.metadata().encoding(), Some(&TestReadingWire::encoding()));
                 assert_eq!(
                     rx.deserialize_borrowed::<TestReadingWire, TestReading>()?,
                     reading
@@ -326,7 +322,7 @@ async fn zero_copy_listener_round_trips_custom_wire_format()
         .expect("zero-copy listener result channel closed");
     sender.abort();
 
-    assert_eq!(encoding, TestReadingWire::encoding());
+    assert_eq!(encoding, Some(TestReadingWire::encoding()));
     assert_eq!(decoded, reading);
     Ok(())
 }

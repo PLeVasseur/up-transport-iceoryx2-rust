@@ -25,8 +25,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use up_rust::{
-    UCode, UFrameMetadata, UOwnedFrame, UOwnedTransport, UStatus, UTxBuffer, UUri,
-    UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport,
+    UCode, UFrameMetadata, UOwnedFrame, UOwnedTransport, UStatus, UUri,
+    transport::verify_filter_criteria,
+    validate_frame_metadata_for_payload, validate_owned_frame_for_transport,
+    zero_copy::{UTxBuffer, UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport},
 };
 
 use crate::workers::dispatcher::Iceoryx2WorkerDispatcher;
@@ -192,6 +194,7 @@ impl Iceoryx2PubSub {
                         .user_header()
                         .payload_layout(sample.payload().len())?;
                     let metadata = sample.user_header().frame_metadata(sample.payload())?;
+                    validate_frame_metadata_for_payload(&metadata, metadata.encoding().is_some())?;
                     listener
                         .on_receive_zero_copy(Iceoryx2RxLease {
                             metadata,
@@ -288,6 +291,13 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
         payload_len: usize,
         alignment: usize,
     ) -> Result<Self::Tx, UStatus> {
+        if header.encoding().is_none() && payload_len != 0 {
+            return Err(UStatus::fail_with_code(
+                UCode::INVALID_ARGUMENT,
+                "message payload is present but payload encoding is absent",
+            ));
+        }
+        validate_frame_metadata_for_payload(&header, header.encoding().is_some())?;
         let source = header.attributes().source();
         let service_name = compute_service_name(
             source,
@@ -336,7 +346,7 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
     ) -> Result<Self::Rx, UStatus> {
-        up_rust::verify_filter_criteria(source_filter, sink_filter)?;
+        verify_filter_criteria(source_filter, sink_filter)?;
         let service_name = compute_service_name(
             source_filter,
             sink_filter,
@@ -351,6 +361,7 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
             .user_header()
             .payload_layout(sample.payload().len())?;
         let metadata = sample.user_header().frame_metadata(sample.payload())?;
+        validate_frame_metadata_for_payload(&metadata, metadata.encoding().is_some())?;
         Ok(Iceoryx2RxLease {
             metadata,
             sample,
@@ -365,7 +376,7 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UZeroCopyListener<Self::Rx>>,
     ) -> Result<(), UStatus> {
-        up_rust::verify_filter_criteria(source_filter, sink_filter)?;
+        verify_filter_criteria(source_filter, sink_filter)?;
         let service_name = compute_service_name(
             source_filter,
             sink_filter,
@@ -389,7 +400,7 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UZeroCopyListener<Self::Rx>>,
     ) -> Result<(), UStatus> {
-        up_rust::verify_filter_criteria(source_filter, sink_filter)?;
+        verify_filter_criteria(source_filter, sink_filter)?;
         let service_name = compute_service_name(
             source_filter,
             sink_filter,
@@ -410,10 +421,15 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
 #[async_trait]
 impl UOwnedTransport for Iceoryx2PubSub {
     async fn send_owned(&self, frame: UOwnedFrame) -> Result<(), UStatus> {
+        validate_owned_frame_for_transport(&frame)?;
+        let payload = frame.payload().cloned();
+        let payload_len = payload.as_ref().map_or(0, |payload| payload.len());
         let mut loan = self
-            .reserve(frame.metadata().clone(), frame.payload().len(), 1)
+            .reserve(frame.metadata().clone(), payload_len, 1)
             .await?;
-        loan.payload_mut().copy_from_slice(frame.payload().as_ref());
+        if let Some(payload) = payload {
+            loan.payload_mut().copy_from_slice(&payload);
+        }
         self.send_zero_copy(loan).await
     }
 }
