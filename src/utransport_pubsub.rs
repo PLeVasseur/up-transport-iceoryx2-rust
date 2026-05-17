@@ -22,13 +22,17 @@ use iceoryx2::{
     service::ipc_threadsafe,
 };
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use up_rust::{
     UCode, UFrameMetadata, UOwnedFrame, UOwnedTransport, UStatus, UUri,
     transport::verify_filter_criteria,
     validate_frame_metadata_for_payload, validate_owned_frame_for_transport,
-    zero_copy::{UTxBuffer, UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport},
+    zero_copy::{
+        UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyRxFrame,
+        UZeroCopyTransport,
+    },
 };
 
 use crate::workers::dispatcher::Iceoryx2WorkerDispatcher;
@@ -281,29 +285,44 @@ pub struct Iceoryx2RxLease {
 }
 
 impl UZeroCopyRxFrame for Iceoryx2RxLease {
+    type PayloadReader<'a>
+        = Cursor<&'a [u8]>
+    where
+        Self: 'a;
+    type PayloadSlices<'a>
+        = std::iter::Once<&'a [u8]>
+    where
+        Self: 'a;
+
     fn metadata(&self) -> &UFrameMetadata {
         &self.metadata
-    }
-
-    fn payload(&self) -> &[u8] {
-        self.payload_contiguous()
-            .expect("iceoryx2 receive payload should be contiguous")
     }
 
     fn payload_len(&self) -> usize {
         self.payload_len
     }
 
-    fn payload_contiguous(&self) -> Option<&[u8]> {
+    fn payload_reader(&self) -> Self::PayloadReader<'_> {
+        Cursor::new(self.contiguous_payload())
+    }
+
+    fn payload_slices(&self) -> Self::PayloadSlices<'_> {
+        std::iter::once(self.contiguous_payload())
+    }
+
+    fn try_contiguous_payload(&self) -> Option<&[u8]> {
         let end = self
             .payload_offset
             .checked_add(self.payload_len)
             .expect("received payload layout overflow");
         self.sample.payload().get(self.payload_offset..end)
     }
+}
 
-    fn for_each_payload_slice(&self, visitor: &mut dyn FnMut(&[u8])) {
-        visitor(self.payload());
+impl UContiguousZeroCopyRxFrame for Iceoryx2RxLease {
+    fn contiguous_payload(&self) -> &[u8] {
+        self.try_contiguous_payload()
+            .expect("iceoryx2 receive payload layout should be valid")
     }
 }
 

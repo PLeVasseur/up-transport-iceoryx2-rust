@@ -20,7 +20,8 @@ use up_rust::{
     UUri,
     wire::{UDeserializer, USerializer, UWireError, WireFormat},
     zero_copy::{
-        UTxBuffer, UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport, UZeroCopyTransportExt,
+        UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyRxFrame,
+        UZeroCopyTransport, UZeroCopyTransportExt,
     },
 };
 use up_transport_iceoryx2_rust::{
@@ -270,8 +271,8 @@ async fn zero_copy_reserve_honors_payload_alignment() -> Result<(), Box<dyn std:
     for _ in 0..100 {
         match subscriber.receive_zero_copy(&topic, None).await {
             Ok(rx) => {
-                assert_eq!(rx.payload().as_ptr() as usize % 64, 0);
-                assert_eq!(rx.payload(), &[0, 10, 0, 0, 0, 64]);
+                assert_eq!(rx.contiguous_payload().as_ptr() as usize % 64, 0);
+                assert_eq!(rx.contiguous_payload(), &[0, 10, 0, 0, 0, 64]);
                 return Ok(());
             }
             Err(status) if status.get_code() == UCode::NOT_FOUND => {
