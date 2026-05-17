@@ -506,3 +506,133 @@ async fn exposes_iceoryx2_service_names_for_streamer_discovery()
     );
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn discovers_matching_iceoryx2_services_by_source_attributes()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-attr-discovery-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x1234_4210, 1, 0x9013)?;
+    let wildcard_instance_filter = UUri::try_from_parts(&authority, 0xFFFF_4210, 1, 0x9013)?;
+    let mismatched_filter = UUri::try_from_parts(&authority, 0xFFFF_4211, 1, 0x9013)?;
+    let transport = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let expected_service = Iceoryx2PubSub::publish_subscribe_service_name(&topic, None)?;
+
+    transport
+        .send_serialized_zero_copy::<TestReadingWire, _>(
+            UFrameMetadata::publish(topic.clone()),
+            &TestReading {
+                sensor_id: 13,
+                counter: 169,
+            },
+        )
+        .await?;
+
+    let matching = transport.discover_matching_service_names(&wildcard_instance_filter)?;
+    assert!(
+        matching.iter().any(|service| service == &expected_service),
+        "expected {expected_service} in {matching:?}"
+    );
+    let mismatched = transport.discover_matching_service_names(&mismatched_filter)?;
+    assert!(
+        !mismatched
+            .iter()
+            .any(|service| service == &expected_service),
+        "did not expect {expected_service} in {mismatched:?}"
+    );
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_listener_discovers_late_matching_publisher()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-late-discovery-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x2345_4210, 1, 0x9014)?;
+    let wildcard_instance_filter = UUri::try_from_parts(&authority, 0xFFFF_4210, 1, 0x9014)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let listener: Arc<dyn UZeroCopyListener<Iceoryx2RxLease>> = Arc::new(LeaseSender(tx));
+
+    subscriber
+        .register_zero_copy_listener(&wildcard_instance_filter, None, listener)
+        .await?;
+
+    let reading = TestReading {
+        sensor_id: 14,
+        counter: 196,
+    };
+    let send_topic = topic.clone();
+    let send_reading = reading.clone();
+    let sender = tokio::spawn(async move {
+        for _ in 0..50 {
+            publisher
+                .send_serialized_zero_copy::<TestReadingWire, _>(
+                    UFrameMetadata::publish(send_topic.clone()),
+                    &send_reading,
+                )
+                .await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok::<(), up_rust::UStatus>(())
+    });
+
+    let (encoding, decoded) = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await?
+        .expect("zero-copy listener result channel closed");
+    sender.abort();
+
+    assert_eq!(encoding, Some(TestReadingWire::encoding()));
+    assert_eq!(decoded, reading);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_listener_fanout_delivers_same_sample_to_two_listeners()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-fanout-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9015)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let (tx_a, mut rx_a) = mpsc::unbounded_channel();
+    let (tx_b, mut rx_b) = mpsc::unbounded_channel();
+    let listener_a: Arc<dyn UZeroCopyListener<Iceoryx2RxLease>> = Arc::new(LeaseSender(tx_a));
+    let listener_b: Arc<dyn UZeroCopyListener<Iceoryx2RxLease>> = Arc::new(LeaseSender(tx_b));
+
+    subscriber
+        .register_zero_copy_listener(&topic, None, listener_a)
+        .await?;
+    subscriber
+        .register_zero_copy_listener(&topic, None, listener_b)
+        .await?;
+
+    let reading = TestReading {
+        sensor_id: 15,
+        counter: 225,
+    };
+    let send_topic = topic.clone();
+    let send_reading = reading.clone();
+    let sender = tokio::spawn(async move {
+        for _ in 0..50 {
+            publisher
+                .send_serialized_zero_copy::<TestReadingWire, _>(
+                    UFrameMetadata::publish(send_topic.clone()),
+                    &send_reading,
+                )
+                .await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok::<(), up_rust::UStatus>(())
+    });
+
+    let (_, decoded_a) = tokio::time::timeout(Duration::from_secs(5), rx_a.recv())
+        .await?
+        .expect("first listener result channel closed");
+    let (_, decoded_b) = tokio::time::timeout(Duration::from_secs(5), rx_b.recv())
+        .await?
+        .expect("second listener result channel closed");
+    sender.abort();
+
+    assert_eq!(decoded_a, reading);
+    assert_eq!(decoded_b, reading);
+    Ok(())
+}
