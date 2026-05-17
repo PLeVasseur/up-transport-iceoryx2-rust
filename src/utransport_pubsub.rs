@@ -286,14 +286,24 @@ impl UZeroCopyRxFrame for Iceoryx2RxLease {
     }
 
     fn payload(&self) -> &[u8] {
+        self.payload_contiguous()
+            .expect("iceoryx2 receive payload should be contiguous")
+    }
+
+    fn payload_len(&self) -> usize {
+        self.payload_len
+    }
+
+    fn payload_contiguous(&self) -> Option<&[u8]> {
         let end = self
             .payload_offset
             .checked_add(self.payload_len)
             .expect("received payload layout overflow");
-        self.sample
-            .payload()
-            .get(self.payload_offset..end)
-            .expect("received payload layout should be valid")
+        self.sample.payload().get(self.payload_offset..end)
+    }
+
+    fn for_each_payload_slice(&self, visitor: &mut dyn FnMut(&[u8])) {
+        visitor(self.payload());
     }
 }
 
