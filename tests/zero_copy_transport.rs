@@ -636,3 +636,119 @@ async fn zero_copy_listener_fanout_delivers_same_sample_to_two_listeners()
     assert_eq!(decoded_b, reading);
     Ok(())
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_publish_fanout_delivers_to_exact_and_source_wildcard_listeners()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-source-wildcard-fanout-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x3456_4210, 1, 0x9016)?;
+    let source_wildcard = UUri::try_from_parts(&authority, 0xFFFF_4210, 1, 0x9016)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let (exact_tx, mut exact_rx) = mpsc::unbounded_channel();
+    let (wildcard_tx, mut wildcard_rx) = mpsc::unbounded_channel();
+    let exact_listener: Arc<dyn UZeroCopyListener<Iceoryx2RxLease>> =
+        Arc::new(LeaseSender(exact_tx));
+    let wildcard_listener: Arc<dyn UZeroCopyListener<Iceoryx2RxLease>> =
+        Arc::new(LeaseSender(wildcard_tx));
+
+    subscriber
+        .register_zero_copy_listener(&topic, None, exact_listener)
+        .await?;
+    subscriber
+        .register_zero_copy_listener(&source_wildcard, None, wildcard_listener)
+        .await?;
+
+    let reading = TestReading {
+        sensor_id: 16,
+        counter: 256,
+    };
+    let send_topic = topic.clone();
+    let send_reading = reading.clone();
+    let sender = tokio::spawn(async move {
+        for _ in 0..50 {
+            publisher
+                .send_serialized_zero_copy::<TestReadingWire, _>(
+                    UFrameMetadata::publish(send_topic.clone()),
+                    &send_reading,
+                )
+                .await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok::<(), up_rust::UStatus>(())
+    });
+
+    let (_, exact_decoded) = tokio::time::timeout(Duration::from_secs(5), exact_rx.recv())
+        .await?
+        .expect("exact listener result channel closed");
+    let (_, wildcard_decoded) = tokio::time::timeout(Duration::from_secs(5), wildcard_rx.recv())
+        .await?
+        .expect("wildcard listener result channel closed");
+    sender.abort();
+
+    assert_eq!(exact_decoded, reading);
+    assert_eq!(wildcard_decoded, reading);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_targeted_fanout_delivers_to_exact_and_sink_wildcard_listeners()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-sink-wildcard-fanout-{}", std::process::id());
+    let source = UUri::try_from_parts(&authority, 0x4210, 1, 0x9017)?;
+    let sink = UUri::try_from_parts(&authority, 0x4220, 1, 0)?;
+    let sink_wildcard = UUri::try_from_parts(&authority, 0xFFFF_FFFF, 0xFF, 0)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let (exact_tx, mut exact_rx) = mpsc::unbounded_channel();
+    let (wildcard_tx, mut wildcard_rx) = mpsc::unbounded_channel();
+    let exact_listener: Arc<dyn UZeroCopyListener<Iceoryx2RxLease>> =
+        Arc::new(LeaseSender(exact_tx));
+    let wildcard_listener: Arc<dyn UZeroCopyListener<Iceoryx2RxLease>> =
+        Arc::new(LeaseSender(wildcard_tx));
+
+    subscriber
+        .register_zero_copy_listener(&source, Some(&sink), exact_listener)
+        .await?;
+    subscriber
+        .register_zero_copy_listener(&source, Some(&sink_wildcard), wildcard_listener)
+        .await?;
+
+    let reading = TestReading {
+        sensor_id: 17,
+        counter: 289,
+    };
+    let send_source = source.clone();
+    let send_sink = sink.clone();
+    let send_reading = reading.clone();
+    let sender = tokio::spawn(async move {
+        for _ in 0..50 {
+            let header = UFrameMetadata::new(
+                UAttributes::new(
+                    UUID::build(),
+                    send_source.clone(),
+                    Some(send_sink.clone()),
+                    UMessageType::Notification,
+                ),
+                TestReadingWire::encoding(),
+            );
+            publisher
+                .send_serialized_zero_copy::<TestReadingWire, _>(header, &send_reading)
+                .await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok::<(), up_rust::UStatus>(())
+    });
+
+    let (_, exact_decoded) = tokio::time::timeout(Duration::from_secs(5), exact_rx.recv())
+        .await?
+        .expect("exact listener result channel closed");
+    let (_, wildcard_decoded) = tokio::time::timeout(Duration::from_secs(5), wildcard_rx.recv())
+        .await?
+        .expect("wildcard listener result channel closed");
+    sender.abort();
+
+    assert_eq!(exact_decoded, reading);
+    assert_eq!(wildcard_decoded, reading);
+    Ok(())
+}
