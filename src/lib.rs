@@ -18,7 +18,7 @@
 //! [`MessagingPattern::PublishSubscribe`]. It implements
 //! [`up_rust::zero_copy::UZeroCopyTransport`] using iceoryx2 transmit loans and
 //! receive leases. The exposed payload view contains only the application bytes
-//! produced by the selected [`up_rust::wire::WireFormat`]; transport metadata and
+//! produced by the selected [`up_rust::payload::PayloadFormat`]; transport metadata and
 //! alignment padding are hidden from callers.
 //!
 //! `Iceoryx2PubSub` also implements [`up_rust::UOwnedTransport`] as a copying

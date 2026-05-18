@@ -13,7 +13,7 @@
 
 use std::str::FromStr;
 
-use up_rust::{UFrameMetadata, UUri, wire::RawBytes, zero_copy::UZeroCopyTransportExt};
+use up_rust::{UFrameMetadata, UUri, payload::RawBytes, zero_copy::UZeroCopyTransportExt};
 use up_transport_iceoryx2_rust::{MessagingPattern, transport::UTransportIceoryx2};
 
 #[tokio::main(flavor = "multi_thread")]

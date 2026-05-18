@@ -16,9 +16,9 @@ use std::sync::Arc;
 use protobuf::well_known_types::wrappers::StringValue;
 use tokio::{sync::mpsc, time::Duration};
 use up_rust::{
-    ProtobufWire, UAttributes, UCode, UEncoding, UFrameMetadata, UMessageType, UPriority, UUID,
+    ProtobufPayload, UAttributes, UCode, UEncoding, UFrameMetadata, UMessageType, UPriority, UUID,
     UUri,
-    wire::{UDeserializer, USerializer, UWireError, WireFormat},
+    payload::{PayloadFormat, UDeserializer, USerializer, UWireError},
     zero_copy::{
         UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyRxFrame,
         UZeroCopyTransport, UZeroCopyTransportExt,
@@ -38,7 +38,7 @@ struct TestReadingWire;
 
 struct AlignedTestReadingWire;
 
-impl WireFormat for TestReadingWire {
+impl PayloadFormat for TestReadingWire {
     fn name() -> &'static str {
         "test-reading-v1"
     }
@@ -52,7 +52,7 @@ impl WireFormat for TestReadingWire {
     }
 }
 
-impl WireFormat for AlignedTestReadingWire {
+impl PayloadFormat for AlignedTestReadingWire {
     fn name() -> &'static str {
         "aligned-test-reading-v1"
     }
@@ -142,7 +142,7 @@ impl UZeroCopyListener<Iceoryx2RxLease> for LeaseSender {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn zero_copy_transport_round_trips_custom_wire_format()
+async fn zero_copy_transport_round_trips_custom_payload_codec()
 -> Result<(), Box<dyn std::error::Error>> {
     let authority = format!("iox-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9002)?;
@@ -194,7 +194,7 @@ async fn zero_copy_transport_round_trips_custom_wire_format()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn zero_copy_transport_round_trips_protobuf_wire_format()
+async fn zero_copy_transport_round_trips_protobuf_payload_codec()
 -> Result<(), Box<dyn std::error::Error>> {
     let authority = format!("iox-pb-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9006)?;
@@ -210,7 +210,7 @@ async fn zero_copy_transport_round_trips_protobuf_wire_format()
     let sender = tokio::spawn(async move {
         for _ in 0..50 {
             publisher
-                .send_serialized_zero_copy::<ProtobufWire, _>(
+                .send_serialized_zero_copy::<ProtobufPayload, _>(
                     UFrameMetadata::publish(send_topic.clone()),
                     &send_payload,
                 )
@@ -223,9 +223,14 @@ async fn zero_copy_transport_round_trips_protobuf_wire_format()
     for _ in 0..100 {
         match subscriber.receive_zero_copy(&topic, None).await {
             Ok(rx) => {
-                assert_eq!(rx.metadata().encoding(), Some(&ProtobufWire::encoding()));
-                let decoded: StringValue = rx.deserialize_borrowed::<ProtobufWire, _>()?;
+                assert_eq!(rx.metadata().encoding(), Some(&ProtobufPayload::encoding()));
+                let decoded: StringValue = rx.deserialize_borrowed::<ProtobufPayload, _>()?;
+                let wrong_codec = rx.deserialize_borrowed::<TestReadingWire, TestReading>();
                 assert_eq!(decoded.value, payload.value);
+                assert!(matches!(
+                    wrong_codec,
+                    Err(UWireError::UnsupportedEncoding { .. })
+                ));
                 sender.abort();
                 return Ok(());
             }
@@ -402,7 +407,7 @@ async fn zero_copy_receive_filters_mismatched_sink() -> Result<(), Box<dyn std::
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn zero_copy_listener_round_trips_custom_wire_format()
+async fn zero_copy_listener_round_trips_custom_payload_codec()
 -> Result<(), Box<dyn std::error::Error>> {
     let authority = format!("iox-listener-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9003)?;
