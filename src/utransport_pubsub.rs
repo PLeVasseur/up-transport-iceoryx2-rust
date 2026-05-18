@@ -397,10 +397,6 @@ impl UTxBuffer for Iceoryx2TxLoan {
         &self.metadata
     }
 
-    fn metadata_mut(&mut self) -> &mut UFrameMetadata {
-        &mut self.metadata
-    }
-
     fn payload(&self) -> &[u8] {
         let end = self
             .payload_offset

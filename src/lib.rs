@@ -20,6 +20,9 @@
 //! receive leases. The exposed payload view contains only the application bytes
 //! produced by the selected [`up_rust::payload::PayloadFormat`]; transport metadata and
 //! alignment padding are hidden from callers.
+//! Metadata is fixed when the transmit loan is reserved so the user header,
+//! hidden metadata prefix, and aligned payload offset remain stable while the
+//! serializer writes into the payload range.
 //!
 //! `Iceoryx2PubSub` also implements [`up_rust::UOwnedTransport`] as a copying
 //! convenience adapter. Owned sends reserve an iceoryx2 loan and copy the owned
