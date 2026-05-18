@@ -18,7 +18,7 @@ edition = "2024"
 keywords = ["uProtocol", "SDK", "communication", "iceoryx", "iceoryx2"]
 
 [dependencies]
-up-rust = { path = "/home/pete.levasseur/eclipse/uprotocol/up-rust" }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "988895bc855398e81a27d1529e3775120d837e97" }
 async-trait = "0.1"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 iceoryx2 = "0.7.0"
@@ -27,4 +27,4 @@ hostname = "0.4.1"
 
 [dev-dependencies]
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
-up-rust = { path = "/home/pete.levasseur/eclipse/uprotocol/up-rust", features = ["protobuf-wire"] }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "988895bc855398e81a27d1529e3775120d837e97", features = ["protobuf-wire"] }
