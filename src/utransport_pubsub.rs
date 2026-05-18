@@ -81,9 +81,35 @@ impl ZeroCopyListenerRegistration {
     }
 }
 
+/// iceoryx2 publish-subscribe transport for native uProtocol frames.
+///
+/// This type is the concrete transport returned by
+/// [`UTransportIceoryx2::build`](crate::transport::UTransportIceoryx2::build).
+/// It implements [`UZeroCopyTransport`] using iceoryx2 loans and receive samples.
+/// It also implements [`UOwnedTransport`] by copying owned payload bytes into a
+/// reserved loan on send and copying receive leases into owned frames for owned
+/// listeners.
+///
+/// Variable native-frame metadata is stored in a hidden implementation metadata
+/// prefix before the application payload. The payload views exposed through
+/// [`Iceoryx2TxLoan`] and [`Iceoryx2RxLease`] exclude that prefix and any
+/// alignment padding.
+///
+/// [`UZeroCopyTransport`]: up_rust::zero_copy::UZeroCopyTransport
+/// [`UOwnedTransport`]: up_rust::UOwnedTransport
 pub struct Iceoryx2PubSub {
     node: Node<ipc_threadsafe::Service>,
+    /// Cached iceoryx2 publishers keyed by service name.
+    ///
+    /// This field is public for compatibility with existing tests and advanced
+    /// integrations. Most applications should use the transport trait methods
+    /// rather than manipulating publishers directly.
     pub publishers: PublisherSet<ipc_threadsafe::Service>,
+    /// Cached pull-receive subscribers keyed by service name.
+    ///
+    /// Listener registrations maintain their own subscriber sets internally so
+    /// multiple matching uProtocol listeners do not consume a single shared
+    /// sample queue.
     pub subscribers: SubscriberSet<ipc_threadsafe::Service>,
     zero_copy_listeners: ZeroCopyListenerMap,
 }
@@ -95,6 +121,8 @@ impl std::fmt::Debug for Iceoryx2PubSub {
 }
 
 impl Iceoryx2PubSub {
+    /// Creates a new publish-subscribe iceoryx2 transport and starts its listener
+    /// discovery worker.
     pub fn new() -> Arc<Self> {
         let node = NodeBuilder::new()
             .create::<ipc_threadsafe::Service>()
@@ -109,6 +137,14 @@ impl Iceoryx2PubSub {
         transport
     }
 
+    /// Creates an iceoryx2 subscriber for `service_name`.
+    ///
+    /// When `source` is provided, the service is opened or created with source
+    /// attributes so wildcard listener discovery can match it later.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the service or subscriber cannot be opened or created.
     pub fn create_subscriber(
         &self,
         service_name: ServiceName,
@@ -140,6 +176,11 @@ impl Iceoryx2PubSub {
         Ok(subscriber)
     }
 
+    /// Computes the iceoryx2 service name for a uProtocol source/sink filter
+    /// pair using the publish-subscribe mapping.
+    ///
+    /// This is primarily useful for diagnostics and tests that need to assert the
+    /// service name visible to iceoryx2.
     pub fn publish_subscribe_service_name(
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
@@ -152,6 +193,11 @@ impl Iceoryx2PubSub {
         .map(|service_name| service_name.as_str().to_owned())
     }
 
+    /// Lists visible iceoryx2 service names for this node configuration.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if iceoryx2 service listing fails.
     pub fn discover_service_names(&self) -> Result<Vec<String>, UStatus> {
         let mut services = Vec::new();
         ipc_threadsafe::Service::list(self.node.config(), |service| {
@@ -164,6 +210,11 @@ impl Iceoryx2PubSub {
         Ok(services)
     }
 
+    /// Lists service names whose source attributes match `source_filter`.
+    ///
+    /// This powers wildcard source listener registration for streamer-style
+    /// subscriptions where the concrete iceoryx2 service name is not known ahead
+    /// of time.
     pub fn discover_matching_service_names(
         &self,
         source_filter: &UUri,
@@ -181,6 +232,8 @@ impl Iceoryx2PubSub {
         Ok(services)
     }
 
+    /// Returns an existing publisher for `service_name` or creates one with
+    /// source attributes for discovery.
     pub async fn get_or_create_publisher(
         &self,
         service_name: ServiceName,
@@ -193,6 +246,10 @@ impl Iceoryx2PubSub {
         self.create_publisher(service_name, source).await
     }
 
+    /// Returns an existing pull subscriber for `service_name` or creates one.
+    ///
+    /// Listener registrations do not use this shared cache; they maintain
+    /// independent subscribers so each listener can consume matching samples.
     pub async fn get_or_create_subscriber(
         &self,
         service_name: ServiceName,
@@ -318,6 +375,16 @@ impl Iceoryx2PubSub {
     }
 }
 
+/// iceoryx2 transmit loan for one native uProtocol frame.
+///
+/// Values are returned by [`UZeroCopyTransport::reserve`] for
+/// [`Iceoryx2PubSub`]. The exposed payload range is aligned for the selected
+/// serializer and excludes the hidden metadata prefix. After
+/// [`UZeroCopyTransport::send_zero_copy`] consumes the loan, callers must treat
+/// the underlying storage as no longer accessible.
+///
+/// [`UZeroCopyTransport::reserve`]: up_rust::zero_copy::UZeroCopyTransport::reserve
+/// [`UZeroCopyTransport::send_zero_copy`]: up_rust::zero_copy::UZeroCopyTransport::send_zero_copy
 pub struct Iceoryx2TxLoan {
     metadata: UFrameMetadata,
     sample: IpcSampleMut,
@@ -357,6 +424,15 @@ impl UTxBuffer for Iceoryx2TxLoan {
     }
 }
 
+/// iceoryx2 receive lease for one native uProtocol frame.
+///
+/// Dropping the lease releases the underlying iceoryx2 sample. The payload is
+/// guaranteed contiguous in the current mapping, so this type implements both
+/// [`UZeroCopyRxFrame`] and [`UContiguousZeroCopyRxFrame`]. Borrowed decoded
+/// values must not outlive the lease.
+///
+/// [`UZeroCopyRxFrame`]: up_rust::zero_copy::UZeroCopyRxFrame
+/// [`UContiguousZeroCopyRxFrame`]: up_rust::zero_copy::UContiguousZeroCopyRxFrame
 pub struct Iceoryx2RxLease {
     metadata: UFrameMetadata,
     sample: IpcSample,
