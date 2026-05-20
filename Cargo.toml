@@ -15,7 +15,11 @@
 name = "up-transport-iceoryx2-rust"
 version = "0.1.0"
 edition = "2024"
+description = "iceoryx2 zero-copy transport for native Eclipse uProtocol frames"
 keywords = ["uProtocol", "SDK", "communication", "iceoryx", "iceoryx2"]
+license = "Apache-2.0"
+readme = "README.md"
+repository = "https://github.com/eclipse-uprotocol/up-transport-iceoryx2-rust"
 
 [dependencies]
 up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "46afb8551077d65df66de29059629332a6fdd501" }
@@ -28,3 +32,10 @@ hostname = "0.4.1"
 [dev-dependencies]
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
 up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "46afb8551077d65df66de29059629332a6fdd501", features = ["protobuf-wire"] }
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(docsrs)'] }

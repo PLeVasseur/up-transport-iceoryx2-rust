@@ -35,6 +35,7 @@
 //! uProtocol listener.
 
 #![warn(rustdoc::bare_urls, rustdoc::broken_intra_doc_links)]
+#![cfg_attr(docsrs, feature(doc_cfg))]
 
 /// uProtocol major version encoded in the iceoryx2 user header.
 pub const UPROTOCOL_MAJOR_VERSION: u8 = 0;
@@ -59,9 +60,18 @@ pub use iceoryx2::prelude::MessagingPattern;
 pub use utransport_pubsub::{Iceoryx2PubSub, Iceoryx2RxLease, Iceoryx2TxLoan};
 
 /// Marker trait for user-header types that are safe for iceoryx2 zero-copy use.
+///
+/// Implementors must be plain zero-copy data that iceoryx2 may place directly in
+/// shared memory. uProtocol frame metadata that does not fit in the fixed user
+/// header is stored in this crate's hidden metadata prefix instead of being
+/// exposed through this trait.
 pub trait BaseUserHeader: Debug + ZeroCopySend {}
 
 /// Marker trait for payload types that are safe for iceoryx2 zero-copy use.
+///
+/// Application code normally uses the dynamic `[u8]` payload path exposed by
+/// [`Iceoryx2TxLoan`] and [`Iceoryx2RxLease`]. This marker exists for lower-level
+/// iceoryx2 integrations that need to constrain custom payload storage types.
 pub trait BasePayload: Debug + ZeroCopySend {}
 
 pub(crate) type PublisherSet<Service> =
