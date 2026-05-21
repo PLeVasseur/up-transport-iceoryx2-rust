@@ -13,7 +13,8 @@
 
 use iceoryx2::prelude::ZeroCopySend;
 use up_rust::{
-    UAttributes, UCode, UEncoding, UFrameMetadata, UMessageType, UPriority, UStatus, UUID, UUri,
+    PayloadEncoding, UAttributes, UCode, UFrameMetadata, UMessageType, UPayloadFormat, UPriority,
+    UStatus, UUID, UUri,
 };
 
 const FRAME_METADATA_MAGIC: &[u8; 4] = b"UFM1";
@@ -259,7 +260,7 @@ pub(crate) fn encode_frame_metadata(header: &UFrameMetadata) -> Result<Vec<u8>, 
 struct FrameMetadata {
     source_authority: String,
     sink_authority: Option<String>,
-    encoding: Option<UEncoding>,
+    encoding: Option<PayloadEncoding>,
     traceparent: Option<String>,
     token: Option<String>,
 }
@@ -305,13 +306,24 @@ impl FrameMetadata {
     }
 }
 
-fn write_optional_encoding(dst: &mut Vec<u8>, value: Option<&UEncoding>) -> Result<(), UStatus> {
+fn write_optional_encoding(
+    dst: &mut Vec<u8>,
+    value: Option<&PayloadEncoding>,
+) -> Result<(), UStatus> {
     match value {
         Some(value) => {
             dst.push(1);
-            write_string(dst, value.format_id())?;
-            write_string(dst, value.content_type())?;
-            write_optional_string(dst, value.schema_ref())?;
+            match value {
+                PayloadEncoding::Standard(format) => {
+                    dst.push(0);
+                    dst.push(format.value());
+                }
+                PayloadEncoding::Custom(custom) => {
+                    dst.push(1);
+                    write_string(dst, custom.id())?;
+                    write_string(dst, custom.content_type())?;
+                }
+            }
         }
         None => dst.push(0),
     }
@@ -376,25 +388,38 @@ fn read_optional_string(src: &mut &[u8]) -> Result<Option<String>, UStatus> {
     }
 }
 
-fn read_optional_encoding(src: &mut &[u8]) -> Result<Option<UEncoding>, UStatus> {
+fn read_optional_encoding(src: &mut &[u8]) -> Result<Option<PayloadEncoding>, UStatus> {
     match read_u8(src)? {
         0 => Ok(None),
-        1 => {
-            let format_id = read_string(src)?;
-            let content_type = read_string(src)?;
-            let schema_ref = read_optional_string(src)?;
-            UEncoding::try_new(format_id, content_type, schema_ref)
-                .map(Some)
-                .map_err(|err| {
-                    UStatus::fail_with_code(
-                        UCode::INVALID_ARGUMENT,
-                        format!("invalid payload encoding metadata: {err}"),
-                    )
-                })
-        }
+        1 => read_encoding(src).map(Some),
         _ => Err(UStatus::fail_with_code(
             UCode::INVALID_ARGUMENT,
             "invalid optional metadata field",
+        )),
+    }
+}
+
+fn read_encoding(src: &mut &[u8]) -> Result<PayloadEncoding, UStatus> {
+    match read_u8(src)? {
+        0 => {
+            let value = read_u8(src)?;
+            let format = UPayloadFormat::from_u8(value).ok_or_else(|| {
+                UStatus::fail_with_code(
+                    UCode::INVALID_ARGUMENT,
+                    format!("invalid standard payload format {value}"),
+                )
+            })?;
+            Ok(PayloadEncoding::standard(format))
+        }
+        1 => PayloadEncoding::try_custom(read_string(src)?, read_string(src)?).map_err(|err| {
+            UStatus::fail_with_code(
+                UCode::INVALID_ARGUMENT,
+                format!("invalid custom payload encoding metadata: {err}"),
+            )
+        }),
+        _ => Err(UStatus::fail_with_code(
+            UCode::INVALID_ARGUMENT,
+            "invalid payload encoding kind",
         )),
     }
 }
@@ -485,7 +510,7 @@ mod tests {
         .with_token("test-token");
         let metadata = UFrameMetadata::new(
             attributes,
-            UEncoding::new("json", "application/json", Some("schema://reading")),
+            PayloadEncoding::custom("json-reading", "application/json"),
         );
         let prefix = encode_frame_metadata(&metadata).unwrap();
         let mut user_header = UProtocolHeader::default();
@@ -521,11 +546,7 @@ mod tests {
                 .with_comm_status(UCode::UNAVAILABLE);
         let metadata = UFrameMetadata::new(
             attributes,
-            UEncoding::new(
-                "custom-json",
-                "application/custom+json",
-                Some("schema://example/type"),
-            ),
+            PayloadEncoding::custom("custom-json", "application/custom+json"),
         );
         let prefix = encode_frame_metadata(&metadata).unwrap();
         let mut user_header = UProtocolHeader::default();
@@ -546,10 +567,8 @@ mod tests {
         let attributes = UAttributes::new(expired_id, source, None, UMessageType::Publish)
             .with_priority(UPriority::CS1)
             .with_ttl(1);
-        let metadata = UFrameMetadata::new(
-            attributes,
-            UEncoding::without_schema_ref("raw-bytes", "application/octet-stream"),
-        );
+        let metadata =
+            UFrameMetadata::new(attributes, PayloadEncoding::standard(UPayloadFormat::Raw));
         let prefix = encode_frame_metadata(&metadata).unwrap();
         let mut user_header = UProtocolHeader::default();
         user_header

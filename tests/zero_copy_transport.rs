@@ -16,8 +16,8 @@ use std::sync::Arc;
 use protobuf::well_known_types::wrappers::StringValue;
 use tokio::{sync::mpsc, time::Duration};
 use up_rust::{
-    ProtobufPayload, UAttributes, UCode, UEncoding, UFrameMetadata, UMessageType, UPriority, UUID,
-    UUri,
+    PayloadEncoding, ProtobufPayload, UAttributes, UCode, UFrameMetadata, UMessageType, UPriority,
+    UUID, UUri,
     payload::{PayloadFormat, UDeserializer, USerializer, UWireError},
     zero_copy::{
         UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyRxFrame,
@@ -43,12 +43,8 @@ impl PayloadFormat for TestReadingWire {
         "test-reading-v1"
     }
 
-    fn encoding() -> UEncoding {
-        UEncoding::new(
-            Self::name(),
-            "application/x.up-test-reading",
-            Some("urn:uprotocol:test:reading:v1"),
-        )
+    fn encoding() -> PayloadEncoding {
+        PayloadEncoding::custom(Self::name(), "application/x.up-test-reading")
     }
 }
 
@@ -57,12 +53,8 @@ impl PayloadFormat for AlignedTestReadingWire {
         "aligned-test-reading-v1"
     }
 
-    fn encoding() -> UEncoding {
-        UEncoding::new(
-            Self::name(),
-            "application/x.up-test-reading",
-            Some("urn:uprotocol:test:reading:aligned:v1"),
-        )
+    fn encoding() -> PayloadEncoding {
+        PayloadEncoding::custom(Self::name(), "application/x.up-test-reading")
     }
 }
 
@@ -126,7 +118,7 @@ impl<'a> UDeserializer<'a, TestReadingWire> for TestReading {
     }
 }
 
-struct LeaseSender(mpsc::UnboundedSender<(Option<UEncoding>, TestReading)>);
+struct LeaseSender(mpsc::UnboundedSender<(Option<PayloadEncoding>, TestReading)>);
 
 #[async_trait::async_trait]
 impl UZeroCopyListener<Iceoryx2RxLease> for LeaseSender {
