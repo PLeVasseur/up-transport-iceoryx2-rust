@@ -12,9 +12,11 @@
 // ################################################################################
 
 use async_trait::async_trait;
+use iceoryx2::port::LoanError;
 use iceoryx2::prelude::{AllocationStrategy, CallbackProgression, MessagingPattern, Service};
 use iceoryx2::sample::Sample;
 use iceoryx2::sample_mut::SampleMut;
+use iceoryx2::sample_mut_uninit::SampleMutUninit;
 use iceoryx2::{
     node::{Node, NodeBuilder},
     port::{publisher::Publisher, subscriber::Subscriber},
@@ -23,15 +25,17 @@ use iceoryx2::{
 };
 use std::collections::HashMap;
 use std::io::Cursor;
+use std::mem::MaybeUninit;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 use up_rust::{
-    UCode, UFrameMetadata, UOwnedFrame, UOwnedTransport, UStatus, UUri,
+    UCode, UFrameMetadata, UStatus, UUri, UZeroCopyUninitTransport,
     transport::verify_filter_criteria,
-    validate_frame_metadata_for_payload, validate_owned_frame_for_transport,
+    validate_frame_metadata_for_payload,
     zero_copy::{
-        UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyRxFrame,
-        UZeroCopyTransport,
+        LoanedPayload, LoanedPayloadUninitMut, PayloadLoanKind, UContiguousZeroCopyRxFrame,
+        ULoanedContiguousZeroCopyRxFrame, UTxBuffer, UUninitTxBuffer, UZeroCopyListener,
+        UZeroCopyRxFrame, UZeroCopyTransport,
     },
 };
 
@@ -44,6 +48,8 @@ use crate::{
 };
 
 type IpcSampleMut = SampleMut<ipc_threadsafe::Service, [u8], UProtocolHeader>;
+type IpcSampleMutUninit =
+    SampleMutUninit<ipc_threadsafe::Service, [MaybeUninit<u8>], UProtocolHeader>;
 type IpcSample = Sample<ipc_threadsafe::Service, [u8], UProtocolHeader>;
 type IpcSubscriber = Subscriber<ipc_threadsafe::Service, [u8], UProtocolHeader>;
 type ZeroCopyListenerMap = RwLock<Vec<ZeroCopyListenerRegistration>>;
@@ -86,9 +92,6 @@ impl ZeroCopyListenerRegistration {
 /// This type is the concrete transport returned by
 /// [`UTransportIceoryx2::build`](crate::transport::UTransportIceoryx2::build).
 /// It implements [`UZeroCopyTransport`] using iceoryx2 loans and receive samples.
-/// It also implements [`UOwnedTransport`] by copying owned payload bytes into a
-/// reserved loan on send and copying receive leases into owned frames for owned
-/// listeners.
 ///
 /// Variable native-frame metadata is stored in a hidden implementation metadata
 /// prefix before the application payload. The payload views exposed through
@@ -96,9 +99,9 @@ impl ZeroCopyListenerRegistration {
 /// alignment padding.
 ///
 /// [`UZeroCopyTransport`]: up_rust::zero_copy::UZeroCopyTransport
-/// [`UOwnedTransport`]: up_rust::UOwnedTransport
 pub struct Iceoryx2PubSub {
     node: Node<ipc_threadsafe::Service>,
+    config: Iceoryx2PubSubConfig,
     /// Cached iceoryx2 publishers keyed by service name.
     ///
     /// This field is public for compatibility with existing tests and advanced
@@ -124,11 +127,17 @@ impl Iceoryx2PubSub {
     /// Creates a new publish-subscribe iceoryx2 transport and starts its listener
     /// discovery worker.
     pub fn new() -> Arc<Self> {
+        Self::with_config(Iceoryx2PubSubConfig::default())
+    }
+
+    /// Creates a new publish-subscribe iceoryx2 transport with explicit allocation settings.
+    pub fn with_config(config: Iceoryx2PubSubConfig) -> Arc<Self> {
         let node = NodeBuilder::new()
             .create::<ipc_threadsafe::Service>()
             .expect("Failed to create Iceoryx2 Node");
         let transport = Arc::new(Self {
             node,
+            config,
             publishers: RwLock::new(HashMap::new()),
             subscribers: RwLock::new(HashMap::new()),
             zero_copy_listeners: RwLock::new(Vec::new()),
@@ -286,7 +295,8 @@ impl Iceoryx2PubSub {
 
         let publisher = service
             .publisher_builder()
-            .allocation_strategy(AllocationStrategy::PowerOfTwo)
+            .initial_max_slice_len(self.config.publisher_initial_max_slice_len)
+            .allocation_strategy(self.config.publisher_allocation_strategy)
             .create()
             .map_err(|e| {
                 UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to create publisher: {e}"))
@@ -375,6 +385,49 @@ impl Iceoryx2PubSub {
     }
 }
 
+/// Publisher allocation controls for [`Iceoryx2PubSub`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Iceoryx2PubSubConfig {
+    /// Initial and static maximum slice length used for publisher loans.
+    pub publisher_initial_max_slice_len: usize,
+    /// iceoryx2 allocation strategy used when a publisher loan exceeds the initial length.
+    pub publisher_allocation_strategy: AllocationStrategy,
+}
+
+impl Default for Iceoryx2PubSubConfig {
+    fn default() -> Self {
+        Self {
+            publisher_initial_max_slice_len: 1,
+            publisher_allocation_strategy: AllocationStrategy::PowerOfTwo,
+        }
+    }
+}
+
+impl Iceoryx2PubSubConfig {
+    /// Creates deterministic static-allocation settings that fail instead of growing.
+    #[must_use]
+    pub fn static_allocation(max_slice_len: usize) -> Self {
+        Self {
+            publisher_initial_max_slice_len: max_slice_len,
+            publisher_allocation_strategy: AllocationStrategy::Static,
+        }
+    }
+
+    /// Sets the publisher initial/max slice length.
+    #[must_use]
+    pub fn with_publisher_initial_max_slice_len(mut self, value: usize) -> Self {
+        self.publisher_initial_max_slice_len = value;
+        self
+    }
+
+    /// Sets the publisher allocation strategy.
+    #[must_use]
+    pub fn with_publisher_allocation_strategy(mut self, value: AllocationStrategy) -> Self {
+        self.publisher_allocation_strategy = value;
+        self
+    }
+}
+
 /// iceoryx2 transmit loan for one native uProtocol frame.
 ///
 /// Values are returned by [`UZeroCopyTransport::reserve`] for
@@ -388,6 +441,14 @@ impl Iceoryx2PubSub {
 pub struct Iceoryx2TxLoan {
     metadata: UFrameMetadata,
     sample: IpcSampleMut,
+    payload_offset: usize,
+    payload_len: usize,
+}
+
+/// iceoryx2 transmit loan whose application payload bytes are not initialized yet.
+pub struct Iceoryx2UninitTxLoan {
+    metadata: UFrameMetadata,
+    sample: IpcSampleMutUninit,
     payload_offset: usize,
     payload_len: usize,
 }
@@ -417,6 +478,56 @@ impl UTxBuffer for Iceoryx2TxLoan {
             .payload_mut()
             .get_mut(self.payload_offset..end)
             .expect("loaned payload layout should be valid")
+    }
+}
+
+impl UUninitTxBuffer for Iceoryx2UninitTxLoan {
+    type Initialized = Iceoryx2TxLoan;
+
+    fn metadata(&self) -> &UFrameMetadata {
+        &self.metadata
+    }
+
+    fn payload_len(&self) -> usize {
+        self.payload_len
+    }
+
+    fn payload_loan_kind(&self) -> PayloadLoanKind {
+        PayloadLoanKind::SharedMemory
+    }
+
+    fn payload_uninit_mut(&mut self) -> LoanedPayloadUninitMut<'_> {
+        let end = self
+            .payload_offset
+            .checked_add(self.payload_len)
+            .expect("loaned payload layout overflow");
+        let payload = self
+            .sample
+            .payload_mut()
+            .get_mut(self.payload_offset..end)
+            .expect("loaned payload layout should be valid");
+        unsafe { LoanedPayloadUninitMut::new_unchecked(payload, PayloadLoanKind::SharedMemory) }
+    }
+
+    unsafe fn assume_payload_init(self) -> Self::Initialized {
+        let mut sample = self.sample;
+        let payload_end = self
+            .payload_offset
+            .checked_add(self.payload_len)
+            .expect("loaned payload layout overflow");
+        let payload = sample.payload_mut();
+        let trailing = payload
+            .get_mut(payload_end..)
+            .expect("loaned trailing padding range should be valid");
+        for byte in trailing {
+            byte.write(0);
+        }
+        Iceoryx2TxLoan {
+            metadata: self.metadata,
+            sample: unsafe { sample.assume_init() },
+            payload_offset: self.payload_offset,
+            payload_len: self.payload_len,
+        }
     }
 }
 
@@ -478,6 +589,15 @@ impl UContiguousZeroCopyRxFrame for Iceoryx2RxLease {
     }
 }
 
+impl ULoanedContiguousZeroCopyRxFrame for Iceoryx2RxLease {
+    fn loaned_contiguous_payload(&self) -> Result<LoanedPayload<'_>, up_rust::payload::UWireError> {
+        let payload = self
+            .try_contiguous_payload()
+            .ok_or(up_rust::payload::UWireError::NotContiguous)?;
+        Ok(unsafe { LoanedPayload::new_unchecked(payload, PayloadLoanKind::SharedMemory) })
+    }
+}
+
 #[async_trait]
 impl UZeroCopyTransport for Iceoryx2PubSub {
     type Tx = Iceoryx2TxLoan;
@@ -506,31 +626,21 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
         let metadata = encode_frame_metadata(&header)?;
         let metadata_len = metadata.len();
         let publisher = self.get_or_create_publisher(service_name, source).await?;
-        let mut sample_len = metadata_len.checked_add(payload_len).ok_or_else(|| {
+        let sample_len = worst_case_aligned_sample_len(metadata_len, payload_len, alignment)?;
+        let mut sample = publisher
+            .loan_slice(sample_len)
+            .map_err(|e| map_loan_error(e, "loan sample"))?;
+        let payload_offset =
+            aligned_payload_offset(sample.payload().as_ptr() as usize, metadata_len, alignment)?;
+        let aligned_sample_len = payload_offset.checked_add(payload_len).ok_or_else(|| {
             UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "sample length overflow")
         })?;
-        let mut aligned_loan = None;
-        for _ in 0..8 {
-            let sample = publisher.loan_slice(sample_len).map_err(|e| {
-                UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to loan sample: {e}"))
-            })?;
-            let payload_offset = aligned_payload_offset(
-                sample.payload().as_ptr() as usize,
-                metadata_len,
-                alignment,
-            )?;
-            let aligned_sample_len = payload_offset.checked_add(payload_len).ok_or_else(|| {
-                UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "sample length overflow")
-            })?;
-            if aligned_sample_len == sample.payload().len() {
-                aligned_loan = Some((sample, payload_offset));
-                break;
-            }
-            sample_len = aligned_sample_len;
+        if aligned_sample_len > sample.payload().len() {
+            return Err(UStatus::fail_with_code(
+                UCode::INTERNAL,
+                "reserved sample is too small for aligned payload layout",
+            ));
         }
-        let (mut sample, payload_offset) = aligned_loan.ok_or_else(|| {
-            UStatus::fail_with_code(UCode::INTERNAL, "failed to reserve aligned payload loan")
-        })?;
         sample
             .payload_mut()
             .get_mut(..metadata_len)
@@ -641,6 +751,69 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
     }
 }
 
+#[async_trait]
+impl UZeroCopyUninitTransport for Iceoryx2PubSub {
+    type UninitTx = Iceoryx2UninitTxLoan;
+
+    async fn reserve_uninit(
+        &self,
+        header: UFrameMetadata,
+        payload_len: usize,
+        alignment: usize,
+    ) -> Result<Self::UninitTx, UStatus> {
+        validate_alignment(alignment)?;
+        if header.encoding().is_none() && payload_len != 0 {
+            return Err(UStatus::fail_with_code(
+                UCode::INVALID_ARGUMENT,
+                "message payload is present but payload encoding is absent",
+            ));
+        }
+        validate_frame_metadata_for_payload(&header, header.encoding().is_some())?;
+        let source = header.attributes().source();
+        let service_name = compute_service_name(
+            source,
+            header.attributes().sink(),
+            MessagingPattern::PublishSubscribe,
+        )?;
+        let metadata = encode_frame_metadata(&header)?;
+        let metadata_len = metadata.len();
+        let publisher = self.get_or_create_publisher(service_name, source).await?;
+        let sample_len = worst_case_aligned_sample_len(metadata_len, payload_len, alignment)?;
+        let mut sample = publisher
+            .loan_slice_uninit(sample_len)
+            .map_err(|e| map_loan_error(e, "loan uninitialized sample"))?;
+        let payload_offset = aligned_payload_offset(
+            sample.payload_mut().as_ptr() as usize,
+            metadata_len,
+            alignment,
+        )?;
+        let aligned_sample_len = payload_offset.checked_add(payload_len).ok_or_else(|| {
+            UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "sample length overflow")
+        })?;
+        if aligned_sample_len > sample.payload_mut().len() {
+            return Err(UStatus::fail_with_code(
+                UCode::INTERNAL,
+                "reserved uninitialized sample is too small for aligned payload layout",
+            ));
+        }
+        write_uninit_bytes(sample.payload_mut(), 0, &metadata)?;
+        initialize_uninit_range(sample.payload_mut(), metadata_len, payload_offset)?;
+        sample.user_header_mut().write_frame_metadata(
+            &header,
+            metadata_len,
+            payload_offset,
+            payload_len,
+            alignment,
+        )?;
+        Ok(Iceoryx2UninitTxLoan {
+            metadata: header,
+            sample,
+            payload_offset,
+            payload_len,
+        })
+    }
+}
+
 fn lease_from_sample(sample: IpcSample) -> Result<Iceoryx2RxLease, UStatus> {
     let (payload_offset, payload_len) = sample
         .user_header()
@@ -664,6 +837,64 @@ fn validate_alignment(alignment: usize) -> Result<(), UStatus> {
         ));
     }
     Ok(())
+}
+
+fn map_loan_error(error: LoanError, operation: &str) -> UStatus {
+    let code = match error {
+        LoanError::OutOfMemory | LoanError::ExceedsMaxLoans | LoanError::ExceedsMaxLoanSize => {
+            UCode::RESOURCE_EXHAUSTED
+        }
+        LoanError::InternalFailure => UCode::INTERNAL,
+    };
+    UStatus::fail_with_code(code, format!("Failed to {operation}: {error}"))
+}
+
+fn write_uninit_bytes(
+    sample: &mut [MaybeUninit<u8>],
+    offset: usize,
+    bytes: &[u8],
+) -> Result<(), UStatus> {
+    let end = offset.checked_add(bytes.len()).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "sample initialization overflow")
+    })?;
+    let dst = sample.get_mut(offset..end).ok_or_else(|| {
+        UStatus::fail_with_code(
+            UCode::INTERNAL,
+            "failed to access uninitialized sample range",
+        )
+    })?;
+    for (dst, src) in dst.iter_mut().zip(bytes) {
+        dst.write(*src);
+    }
+    Ok(())
+}
+
+fn initialize_uninit_range(
+    sample: &mut [MaybeUninit<u8>],
+    start: usize,
+    end: usize,
+) -> Result<(), UStatus> {
+    let dst = sample.get_mut(start..end).ok_or_else(|| {
+        UStatus::fail_with_code(
+            UCode::INTERNAL,
+            "failed to access uninitialized sample range",
+        )
+    })?;
+    for byte in dst {
+        byte.write(0);
+    }
+    Ok(())
+}
+
+fn worst_case_aligned_sample_len(
+    metadata_len: usize,
+    payload_len: usize,
+    alignment: usize,
+) -> Result<usize, UStatus> {
+    metadata_len
+        .checked_add(alignment - 1)
+        .and_then(|len| len.checked_add(payload_len))
+        .ok_or_else(|| UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "sample length overflow"))
 }
 
 fn aligned_payload_offset(
@@ -707,18 +938,20 @@ fn sink_matches(actual: Option<&UUri>, filter: Option<&UUri>) -> bool {
     filter.is_none_or(|filter| actual.is_some_and(|actual| filter.matches(actual)))
 }
 
-#[async_trait]
-impl UOwnedTransport for Iceoryx2PubSub {
-    async fn send_owned(&self, frame: UOwnedFrame) -> Result<(), UStatus> {
-        validate_owned_frame_for_transport(&frame)?;
-        let payload = frame.payload().cloned();
-        let payload_len = payload.as_ref().map_or(0, |payload| payload.len());
-        let mut loan = self
-            .reserve(frame.metadata().clone(), payload_len, 1)
-            .await?;
-        if let Some(payload) = payload {
-            loan.payload_mut().copy_from_slice(&payload);
-        }
-        self.send_zero_copy(loan).await
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn worst_case_aligned_sample_len_includes_max_alignment_padding() {
+        assert_eq!(worst_case_aligned_sample_len(10, 6, 64).unwrap(), 79);
+        assert_eq!(worst_case_aligned_sample_len(10, 6, 1).unwrap(), 16);
+    }
+
+    #[test]
+    fn worst_case_aligned_sample_len_rejects_overflow() {
+        let error = worst_case_aligned_sample_len(usize::MAX, 1, 2).unwrap_err();
+
+        assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT);
     }
 }

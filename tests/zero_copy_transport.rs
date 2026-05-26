@@ -11,21 +11,54 @@
 // SPDX-License-Identifier: Apache-2.0
 // ################################################################################
 
-use std::sync::Arc;
+use std::{mem, sync::Arc};
 
 use protobuf::well_known_types::wrappers::StringValue;
 use tokio::{sync::mpsc, time::Duration};
 use up_rust::{
     PayloadEncoding, ProtobufPayload, UAttributes, UCode, UFrameMetadata, UMessageType, UPriority,
-    UUID, UUri,
-    payload::{PayloadFormat, UDeserializer, USerializer, UWireError},
+    UUID, UUri, UZeroCopyUninitTransportExt,
+    payload::{
+        PayloadFormat, PlacementDefault, RawBytes, StableContainerPayload, UDeserializer,
+        USerializer, UWireError,
+    },
+    test_util::zero_copy_conformance,
     zero_copy::{
-        UContiguousZeroCopyRxFrame, UTxBuffer, UZeroCopyListener, UZeroCopyRxFrame,
-        UZeroCopyTransport, UZeroCopyTransportExt,
+        PayloadLoanKind, UContiguousZeroCopyRxFrame, ULoanedContiguousZeroCopyRxFrame, UTxBuffer,
+        UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport, UZeroCopyTransportExt,
     },
 };
+
+#[repr(C)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Default,
+    Eq,
+    PartialEq,
+    PlacementDefault,
+    up_rust::StablePayload,
+    up_rust::ByteBackedStablePayload,
+)]
+#[stable_payload(type_name = "example.vehicle.VehiclePose")]
+struct VehiclePose {
+    x: u32,
+    y: u32,
+}
+
+fn bytes_of_pose(pose: &VehiclePose) -> &[u8] {
+    unsafe {
+        std::slice::from_raw_parts(
+            (pose as *const VehiclePose).cast::<u8>(),
+            mem::size_of::<VehiclePose>(),
+        )
+    }
+}
+
 use up_transport_iceoryx2_rust::{
-    Iceoryx2PubSub, Iceoryx2RxLease, MessagingPattern, transport::UTransportIceoryx2,
+    Iceoryx2PubSub, Iceoryx2PubSubConfig, Iceoryx2RxLease, MessagingPattern,
+    transport::UTransportIceoryx2,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -235,6 +268,326 @@ async fn zero_copy_transport_round_trips_protobuf_payload_codec()
 
     sender.abort();
     Err("timed out waiting for a protobuf zero-copy sample".into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_transport_round_trips_stable_container_payload()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-stable-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9007)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+
+    let _ = subscriber.receive_zero_copy(&topic, None).await;
+
+    let expected = VehiclePose { x: 55, y: 89 };
+    let send_topic = topic.clone();
+    let send_expected = expected;
+    let sender = tokio::spawn(async move {
+        for _ in 0..50 {
+            publisher
+                .send_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
+                    UFrameMetadata::publish(send_topic.clone()),
+                    |payload| {
+                        payload.x = send_expected.x;
+                        payload.y = send_expected.y;
+                    },
+                )
+                .await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok::<(), up_rust::UStatus>(())
+    });
+
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&topic, None).await {
+            Ok(rx) => {
+                assert_eq!(
+                    rx.metadata().encoding(),
+                    Some(&StableContainerPayload::<VehiclePose>::encoding())
+                );
+                assert_eq!(
+                    rx.contiguous_payload().as_ptr() as usize % mem::align_of::<VehiclePose>(),
+                    0
+                );
+                zero_copy_conformance::verify_loaned_rx_payload_layout_for(
+                    &rx,
+                    mem::size_of::<VehiclePose>(),
+                    mem::align_of::<VehiclePose>(),
+                )?;
+                let pose = zero_copy_conformance::borrow_loaned_payload_as::<
+                    StableContainerPayload<VehiclePose>,
+                    VehiclePose,
+                >(&rx)?;
+                assert_eq!(pose, &expected);
+                sender.abort();
+                return Ok(());
+            }
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+
+    sender.abort();
+    Err("timed out waiting for a stable-container zero-copy sample".into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_transport_round_trips_stable_container_uninit_payload()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-stable-uninit-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9009)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+
+    let _ = subscriber.receive_zero_copy(&topic, None).await;
+
+    let expected = VehiclePose { x: 144, y: 233 };
+    let send_topic = topic.clone();
+    let sender = tokio::spawn(async move {
+        for _ in 0..50 {
+            publisher
+                .send_uninit_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
+                    UFrameMetadata::publish(send_topic.clone()),
+                    |slot| Ok(slot.write(expected)),
+                )
+                .await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok::<(), up_rust::UStatus>(())
+    });
+
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&topic, None).await {
+            Ok(rx) => {
+                assert_eq!(rx.payload_loan_kind()?, PayloadLoanKind::SharedMemory);
+                let pose = zero_copy_conformance::borrow_loaned_payload_as::<
+                    StableContainerPayload<VehiclePose>,
+                    VehiclePose,
+                >(&rx)?;
+                assert_eq!(pose, &expected);
+                sender.abort();
+                return Ok(());
+            }
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+
+    sender.abort();
+    Err("timed out waiting for a stable-container uninit zero-copy sample".into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn static_allocation_rejects_oversized_payload_without_growth()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-static-cap-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9011)?;
+    let publisher = UTransportIceoryx2::build_with_config(
+        MessagingPattern::PublishSubscribe,
+        Iceoryx2PubSubConfig::static_allocation(1),
+    )?;
+
+    let result = publisher
+        .reserve(
+            UFrameMetadata::publish(topic).with_encoding(RawBytes::encoding()),
+            64,
+            1,
+        )
+        .await;
+    let Err(error) = result else {
+        panic!("static iceoryx2 allocation should reject oversized sample");
+    };
+
+    assert_eq!(error.get_code(), UCode::RESOURCE_EXHAUSTED);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn static_allocation_round_trips_stable_container_uninit_payload()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-static-stable-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9018)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build_with_config(
+        MessagingPattern::PublishSubscribe,
+        Iceoryx2PubSubConfig::static_allocation(512),
+    )?;
+
+    let _ = subscriber.receive_zero_copy(&topic, None).await;
+
+    let expected = VehiclePose { x: 377, y: 610 };
+    let send_topic = topic.clone();
+    let sender = tokio::spawn(async move {
+        for _ in 0..50 {
+            publisher
+                .send_uninit_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
+                    UFrameMetadata::publish(send_topic.clone()),
+                    |slot| Ok(slot.write(expected)),
+                )
+                .await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok::<(), up_rust::UStatus>(())
+    });
+
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&topic, None).await {
+            Ok(rx) => {
+                assert_eq!(rx.payload_loan_kind()?, PayloadLoanKind::SharedMemory);
+                let pose = zero_copy_conformance::borrow_loaned_payload_as::<
+                    StableContainerPayload<VehiclePose>,
+                    VehiclePose,
+                >(&rx)?;
+                assert_eq!(pose, &expected);
+                sender.abort();
+                return Ok(());
+            }
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+
+    sender.abort();
+    Err("timed out waiting for a static stable-container zero-copy sample".into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn static_allocation_honors_high_alignment_padding_without_growth()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-static-align-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9019)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build_with_config(
+        MessagingPattern::PublishSubscribe,
+        Iceoryx2PubSubConfig::static_allocation(512),
+    )?;
+
+    let _ = subscriber.receive_zero_copy(&topic, None).await;
+
+    let reading = TestReading {
+        sensor_id: 19,
+        counter: 512,
+    };
+    let mut loan = publisher
+        .reserve(
+            UFrameMetadata::publish(topic.clone())
+                .with_encoding(AlignedTestReadingWire::encoding()),
+            <TestReading as USerializer<AlignedTestReadingWire>>::encoded_len(&reading),
+            <TestReading as USerializer<AlignedTestReadingWire>>::ALIGNMENT,
+        )
+        .await?;
+    assert_eq!(
+        loan.payload_mut().as_ptr() as usize
+            % <TestReading as USerializer<AlignedTestReadingWire>>::ALIGNMENT,
+        0
+    );
+    <TestReading as USerializer<AlignedTestReadingWire>>::serialize_into(
+        &reading,
+        loan.payload_mut(),
+    )?;
+    publisher.send_zero_copy(loan).await?;
+
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&topic, None).await {
+            Ok(rx) => {
+                assert_eq!(rx.payload_loan_kind()?, PayloadLoanKind::SharedMemory);
+                assert_eq!(
+                    rx.contiguous_payload().as_ptr() as usize
+                        % <TestReading as USerializer<AlignedTestReadingWire>>::ALIGNMENT,
+                    0
+                );
+                assert_eq!(rx.contiguous_payload(), &[0, 19, 0, 0, 2, 0]);
+                return Ok(());
+            }
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+
+    Err("timed out waiting for a static aligned zero-copy sample".into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn static_allocation_rejects_metadata_heavy_frame_without_growth()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-static-metadata-cap-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9020)?;
+    let publisher = UTransportIceoryx2::build_with_config(
+        MessagingPattern::PublishSubscribe,
+        Iceoryx2PubSubConfig::static_allocation(1),
+    )?;
+    let attributes = UAttributes::new(UUID::build(), topic, None, UMessageType::Publish)
+        .with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00");
+    let metadata = UFrameMetadata::without_payload_encoding(attributes);
+
+    let result = publisher.reserve(metadata, 0, 1).await;
+    let Err(error) = result else {
+        panic!("static iceoryx2 allocation should reject metadata-only frames over capacity");
+    };
+
+    assert_eq!(error.get_code(), UCode::RESOURCE_EXHAUSTED);
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_transport_rejects_stable_container_wrong_type_name_metadata()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-stable-negative-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9008)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+
+    let _ = subscriber.receive_zero_copy(&topic, None).await;
+
+    let pose = VehiclePose { x: 55, y: 89 };
+    let encoding = zero_copy_conformance::stable_container_encoding_for::<VehiclePose>(
+        "example.vehicle.OtherPose",
+        "fixed",
+        mem::size_of::<VehiclePose>(),
+        mem::align_of::<VehiclePose>(),
+    );
+    let mut loan = publisher
+        .reserve(
+            UFrameMetadata::publish(topic.clone()).with_encoding(encoding),
+            mem::size_of::<VehiclePose>(),
+            mem::align_of::<VehiclePose>(),
+        )
+        .await?;
+    loan.payload_mut().copy_from_slice(bytes_of_pose(&pose));
+    publisher.send_zero_copy(loan).await?;
+
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&topic, None).await {
+            Ok(rx) => {
+                let error = zero_copy_conformance::borrow_loaned_payload_as::<
+                    StableContainerPayload<VehiclePose>,
+                    VehiclePose,
+                >(&rx)
+                .unwrap_err();
+                assert!(matches!(
+                    error,
+                    UWireError::IncompatibleStablePayload { actual, .. }
+                        if actual.contains("OtherPose")
+                ));
+                return Ok(());
+            }
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+
+    Err("timed out waiting for a malformed stable-container zero-copy sample".into())
 }
 
 #[tokio::test(flavor = "multi_thread")]

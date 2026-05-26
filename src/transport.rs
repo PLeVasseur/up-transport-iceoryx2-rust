@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use crate::utransport_pubsub::Iceoryx2PubSub;
+use crate::utransport_pubsub::{Iceoryx2PubSub, Iceoryx2PubSubConfig};
 use iceoryx2::prelude::MessagingPattern;
 use up_rust::{UCode, UStatus};
 
@@ -21,8 +21,9 @@ use up_rust::{UCode, UStatus};
 ///
 /// iceoryx2 support in this crate is currently implemented for
 /// [`MessagingPattern::PublishSubscribe`]. The returned [`Iceoryx2PubSub`]
-/// implements both the true zero-copy transport capability and an owned-frame
-/// copying adapter.
+/// implements the true zero-copy transport capability. Use
+/// `up_rust::transport::UOwnedFrameEndpoint::from_zero_copy_copying_adapter`
+/// when an owned-frame copy boundary is intentional.
 pub struct UTransportIceoryx2 {}
 
 impl UTransportIceoryx2 {
@@ -33,8 +34,23 @@ impl UTransportIceoryx2 {
     /// Returns [`UCode::UNIMPLEMENTED`] for messaging patterns other than
     /// [`MessagingPattern::PublishSubscribe`].
     pub fn build(messaging_pattern: MessagingPattern) -> Result<Arc<Iceoryx2PubSub>, UStatus> {
+        Self::build_with_config(messaging_pattern, Iceoryx2PubSubConfig::default())
+    }
+
+    /// Builds an iceoryx2 transport with explicit publish-subscribe allocation settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`UCode::UNIMPLEMENTED`] for messaging patterns other than
+    /// [`MessagingPattern::PublishSubscribe`].
+    pub fn build_with_config(
+        messaging_pattern: MessagingPattern,
+        config: Iceoryx2PubSubConfig,
+    ) -> Result<Arc<Iceoryx2PubSub>, UStatus> {
         match messaging_pattern {
-            MessagingPattern::PublishSubscribe => Ok(UTransportIceoryx2::build_publish_subscribe()),
+            MessagingPattern::PublishSubscribe => {
+                Ok(UTransportIceoryx2::build_publish_subscribe(config))
+            }
             _ => Err(UStatus::fail_with_code(
                 UCode::UNIMPLEMENTED,
                 "Unimplemented messaging pattern",
@@ -42,7 +58,7 @@ impl UTransportIceoryx2 {
         }
     }
 
-    fn build_publish_subscribe() -> Arc<Iceoryx2PubSub> {
-        Iceoryx2PubSub::new()
+    fn build_publish_subscribe(config: Iceoryx2PubSubConfig) -> Arc<Iceoryx2PubSub> {
+        Iceoryx2PubSub::with_config(config)
     }
 }

@@ -24,10 +24,10 @@
 //! hidden metadata prefix, and aligned payload offset remain stable while the
 //! serializer writes into the payload range.
 //!
-//! `Iceoryx2PubSub` also implements [`up_rust::UOwnedTransport`] as a copying
-//! convenience adapter. Owned sends reserve an iceoryx2 loan and copy the owned
-//! payload into it; use the zero-copy extension helpers when callers can
-//! serialize directly into the loan.
+//! Use [`up_rust::transport::UOwnedFrameEndpoint::from_zero_copy_copying_adapter`]
+//! when an owned-frame boundary is required. That adapter copies payload bytes at
+//! ingress and egress; `Iceoryx2PubSub` itself only exposes zero-copy transport
+//! capabilities.
 //!
 //! Wildcard listener registrations discover concrete iceoryx2 services through
 //! service attributes. Independent listener registrations use independent
@@ -57,7 +57,9 @@ pub(crate) mod utransport_pubsub;
 pub(crate) mod workers;
 
 pub use iceoryx2::prelude::MessagingPattern;
-pub use utransport_pubsub::{Iceoryx2PubSub, Iceoryx2RxLease, Iceoryx2TxLoan};
+pub use utransport_pubsub::{
+    Iceoryx2PubSub, Iceoryx2PubSubConfig, Iceoryx2RxLease, Iceoryx2TxLoan, Iceoryx2UninitTxLoan,
+};
 
 /// Marker trait for user-header types that are safe for iceoryx2 zero-copy use.
 ///

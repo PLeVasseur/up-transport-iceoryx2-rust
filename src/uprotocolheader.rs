@@ -227,11 +227,11 @@ impl UProtocolHeader {
         let total_len = payload_offset.checked_add(payload_len).ok_or_else(|| {
             UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "sample payload length overflow")
         })?;
-        if total_len != sample_payload_len {
+        if total_len > sample_payload_len {
             return Err(UStatus::fail_with_code(
                 UCode::INVALID_ARGUMENT,
                 format!(
-                    "sample payload length does not match metadata layout: {sample_payload_len} != {total_len}"
+                    "sample payload length is too small for metadata layout: {sample_payload_len} < {total_len}"
                 ),
             ));
         }
@@ -239,7 +239,10 @@ impl UProtocolHeader {
     }
 
     fn metadata<'a>(&self, sample_payload: &'a [u8]) -> Result<&'a [u8], UStatus> {
-        let (metadata_len, _) = self.payload_layout(sample_payload.len())?;
+        let _ = self.payload_layout(sample_payload.len())?;
+        let metadata_len = usize::try_from(self.metadata_len).map_err(|_| {
+            UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "metadata length exceeds usize")
+        })?;
         sample_payload.get(..metadata_len).ok_or_else(|| {
             UStatus::fail_with_code(UCode::INVALID_ARGUMENT, "sample metadata is missing")
         })
@@ -578,6 +581,43 @@ mod tests {
         let decoded = user_header.frame_metadata(&prefix).unwrap();
 
         assert!(decoded.attributes().is_expired());
+    }
+
+    #[test]
+    fn payload_layout_accepts_trailing_hidden_padding() {
+        let metadata =
+            UFrameMetadata::publish(UUri::try_from_parts("vehicle", 0xA8000, 2, 0x8001).unwrap())
+                .with_encoding(PayloadEncoding::standard(UPayloadFormat::Raw));
+        let prefix = encode_frame_metadata(&metadata).unwrap();
+        let mut user_header = UProtocolHeader::default();
+        user_header
+            .write_frame_metadata(&metadata, prefix.len(), prefix.len() + 3, 8, 4)
+            .unwrap();
+
+        assert_eq!(
+            user_header
+                .payload_layout(prefix.len() + 3 + 8 + 2)
+                .unwrap(),
+            (prefix.len() + 3, 8)
+        );
+    }
+
+    #[test]
+    fn payload_layout_rejects_sample_shorter_than_visible_payload() {
+        let metadata =
+            UFrameMetadata::publish(UUri::try_from_parts("vehicle", 0xA8000, 2, 0x8001).unwrap())
+                .with_encoding(PayloadEncoding::standard(UPayloadFormat::Raw));
+        let prefix = encode_frame_metadata(&metadata).unwrap();
+        let mut user_header = UProtocolHeader::default();
+        user_header
+            .write_frame_metadata(&metadata, prefix.len(), prefix.len() + 3, 8, 4)
+            .unwrap();
+
+        let error = user_header
+            .payload_layout(prefix.len() + 3 + 7)
+            .unwrap_err();
+
+        assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT);
     }
 
     #[test]

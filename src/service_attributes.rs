@@ -13,6 +13,7 @@
 
 use iceoryx2::prelude::{AttributeVerifier, SemanticString};
 use iceoryx2::service::attribute::{AttributeKey, AttributeSet, AttributeValue};
+use iceoryx2_bb_container::string::String as IoxString;
 use up_rust::{UCode, UStatus, UUri};
 
 use crate::service_name_mapping::{encode_hex, get_authority_name};
@@ -29,7 +30,12 @@ const TRANSPORT_VALUE: &str = "uprotocol";
 pub(crate) fn source_attribute_verifier(source: &UUri) -> Result<AttributeVerifier, UStatus> {
     let mut verifier = AttributeVerifier::new();
     for (key, value) in source_attribute_pairs(source)? {
-        verifier = verifier.require(&key, &value);
+        verifier = verifier.require(&key, &value).map_err(|error| {
+            UStatus::fail_with_code(
+                UCode::INVALID_ARGUMENT,
+                format!("invalid iceoryx2 service attribute verifier requirement: {error}"),
+            )
+        })?;
     }
     Ok(verifier)
 }
@@ -109,7 +115,7 @@ fn normalized_filter(filter: &UUri) -> UUri {
 
 fn attribute_value<'a>(attributes: &'a AttributeSet, key: &str) -> Option<&'a str> {
     let key: AttributeKey = key.try_into().ok()?;
-    attributes.key_value(&key, 0)?.as_string().as_str().ok()
+    Some(attributes.key_value(&key, 0)?.as_string().as_str())
 }
 
 fn parse_hex_u16(value: &str) -> Option<u16> {

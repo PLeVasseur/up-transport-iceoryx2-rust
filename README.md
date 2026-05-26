@@ -3,7 +3,7 @@ Rust uTransport implementation for iceoryx2
 
 This crate implements the native `up-rust` zero-copy transport capability. Payload serializers write into an iceoryx2 transmit loan through `UTxBuffer`, and subscribers receive lease-backed frames through `UZeroCopyRxFrame`. Native frame metadata is fixed when the loan is reserved, then split between the fixed user header and an implementation metadata prefix so `UAttributes` and `PayloadEncoding` are preserved without exposing the prefix as application payload bytes.
 
-The owned `UOwnedTransport` implementation is an adapter over the zero-copy path: sending an owned frame reserves a loan and copies the owned payload into it. Use the zero-copy extension helpers when the caller can serialize directly into the loan.
+`Iceoryx2PubSub` does not implement `UOwnedTransport` directly. Use `UOwnedFrameEndpoint::from_zero_copy_copying_adapter` when an owned-frame boundary is intentional; that adapter copies at the boundary.
 
 ## How The Pieces Fit
 
@@ -36,6 +36,41 @@ transport
 ```
 
 On receive, use `UZeroCopyRxFrame::deserialize_from_reader::<Codec, T>()` for generic leases or `UContiguousZeroCopyRxFrame::deserialize_borrowed::<Codec, T>()` when the decoded value needs to borrow from the contiguous iceoryx2 sample.
+
+Stable typed payloads can be constructed in shared memory without first
+default-initializing the application payload region:
+
+```rust
+use up_rust::{payload::StableContainerPayload, UFrameMetadata, UZeroCopyUninitTransportExt};
+
+#[repr(C)]
+#[derive(Clone, Copy, up_rust::StablePayload)]
+#[stable_payload(type_name = "example.vehicle.VehiclePose")]
+struct VehiclePose {
+    x: u64,
+    y: u64,
+}
+
+async fn send<T>(transport: &T, metadata: UFrameMetadata) -> Result<(), up_rust::UStatus>
+where
+    T: up_rust::UZeroCopyUninitTransport,
+{
+    transport
+        .send_uninit_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
+            metadata,
+            |slot| Ok(slot.write(VehiclePose { x: 1, y: 2 })),
+        )
+        .await
+}
+```
+
+Use `Iceoryx2PubSubConfig::static_allocation(max_slice_len)` with
+`UTransportIceoryx2::build_with_config` for deterministic runs that fail instead
+of growing shared memory when a frame exceeds the configured capacity. Size the
+capacity for the hidden metadata prefix, alignment padding, and application
+payload bytes. The transport requests one deterministic worst-case sample length
+of `metadata_len + payload_len + alignment - 1`; any unused suffix is hidden
+transport padding and is never exposed through application payload views.
 
 ## Verification
 
