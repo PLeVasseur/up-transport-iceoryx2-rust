@@ -48,6 +48,14 @@ struct VehiclePose {
 }
 
 fn bytes_of_pose(pose: &VehiclePose) -> &[u8] {
+    // SAFETY:
+    // - `pose` is a valid shared reference to one `VehiclePose` and is therefore
+    //   non-null, aligned, and valid for reads of `size_of::<VehiclePose>()`
+    //   bytes.
+    // - Per https://doc.rust-lang.org/stable/std/slice/fn.from_raw_parts.html#safety:
+    //
+    //   "data must be non-null, valid for reads for `len * size_of::<T>()` many
+    //   bytes, and it must be properly aligned."
     unsafe {
         std::slice::from_raw_parts(
             (pose as *const VehiclePose).cast::<u8>(),

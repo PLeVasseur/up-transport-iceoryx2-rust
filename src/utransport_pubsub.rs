@@ -506,6 +506,16 @@ impl UUninitTxBuffer for Iceoryx2UninitTxLoan {
             .payload_mut()
             .get_mut(self.payload_offset..end)
             .expect("loaned payload layout should be valid");
+        // SAFETY:
+        // - The range was checked against the iceoryx2 sample payload above and
+        //   is the exact visible application payload range computed at reserve.
+        // - `&mut self` gives exclusive access to the sample while the loaned
+        //   uninit payload view exists.
+        // - The backing storage is an iceoryx2 shared-memory sample.
+        // - Per https://doc.rust-lang.org/stable/std/slice/fn.from_raw_parts_mut.html#safety,
+        //   the backing slice must be valid for writes and "must not be accessed
+        //   through any other pointer" for the returned lifetime; the mutable
+        //   sample borrow supplies that exclusivity.
         unsafe { LoanedPayloadUninitMut::new_unchecked(payload, PayloadLoanKind::SharedMemory) }
     }
 
@@ -524,6 +534,16 @@ impl UUninitTxBuffer for Iceoryx2UninitTxLoan {
         }
         Iceoryx2TxLoan {
             metadata: self.metadata,
+            // SAFETY:
+            // - The caller of `assume_payload_init` guarantees the visible
+            //   application payload bytes are initialized.
+            // - This function initializes the trailing sample bytes before
+            //   committing the iceoryx2 sample.
+            // - The sample prefix/user-header bytes were initialized before the
+            //   uninitialized payload loan was exposed.
+            // - External contract: iceoryx2's `sample.assume_init()` commits the
+            //   sample only after all sample bytes are initialized. This real
+            //   shared-memory path is not Miri-feasible.
             sample: unsafe { sample.assume_init() },
             payload_offset: self.payload_offset,
             payload_len: self.payload_len,
@@ -594,6 +614,15 @@ impl ULoanedContiguousZeroCopyRxFrame for Iceoryx2RxLease {
         let payload = self
             .try_contiguous_payload()
             .ok_or(up_rust::payload::UWireError::NotContiguous)?;
+        // SAFETY:
+        // - `payload` is borrowed directly from this receive lease's iceoryx2
+        //   sample and remains valid for the lifetime of `&self`.
+        // - No allocation or coalescing is performed to produce the slice, and
+        //   the backing storage is shared memory.
+        // - Per https://doc.rust-lang.org/stable/std/slice/fn.from_raw_parts.html#safety,
+        //   a borrowed slice must be valid for reads and contained within one
+        //   allocation; the iceoryx2 sample lease supplies that external
+        //   provenance.
         Ok(unsafe { LoanedPayload::new_unchecked(payload, PayloadLoanKind::SharedMemory) })
     }
 }
