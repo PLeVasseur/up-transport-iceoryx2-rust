@@ -520,6 +520,15 @@ impl UUninitTxBuffer for Iceoryx2UninitTxLoan {
     }
 
     unsafe fn assume_payload_init(self) -> Self::Initialized {
+        // SAFETY CONTRACT:
+        // - The caller of `UUninitTxBuffer::assume_payload_init` guarantees the
+        //   visible application payload range returned by `payload_uninit_mut`
+        //   was fully initialized before conversion.
+        // - This implementation initializes the remaining sample tail bytes, so
+        //   the iceoryx2 sample commit never observes uninitialized bytes.
+        // - External contract: iceoryx2 preserves the sample allocation,
+        //   alignment, and ownership semantics when `sample.assume_init()`
+        //   commits the shared-memory loan.
         let mut sample = self.sample;
         let payload_end = self
             .payload_offset
