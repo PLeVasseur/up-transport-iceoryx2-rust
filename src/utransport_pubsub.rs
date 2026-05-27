@@ -248,7 +248,7 @@ impl Iceoryx2PubSub {
         service_name: ServiceName,
         source: &UUri,
     ) -> Result<Arc<Publisher<ipc_threadsafe::Service, [u8], UProtocolHeader>>, UStatus> {
-        let publisher = self.get_publisher(service_name.clone()).await;
+        let publisher = self.get_publisher(service_name).await;
         if let Some(publisher) = publisher {
             return Ok(publisher);
         }
@@ -270,7 +270,7 @@ impl Iceoryx2PubSub {
         }
         drop(subscribers);
 
-        let subscriber = self.create_subscriber(service_name.clone(), source)?;
+        let subscriber = self.create_subscriber(service_name, source)?;
         let mut subscribers = self.subscribers.write().await;
         let subscriber = Arc::new(subscriber);
         subscribers.insert(service_name, subscriber.clone());
@@ -302,7 +302,7 @@ impl Iceoryx2PubSub {
                 UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to create publisher: {e}"))
             })?;
         let mut publishers = self.publishers.write().await;
-        publishers.insert(service_name.clone(), Arc::new(publisher));
+        publishers.insert(service_name, Arc::new(publisher));
         let publisher = publishers.get(&service_name).unwrap();
         Ok(publisher.clone())
     }
@@ -358,7 +358,7 @@ impl Iceoryx2PubSub {
         let mut services = Vec::new();
         ipc_threadsafe::Service::list(self.node.config(), |service| {
             services.push((
-                service.static_details.name().clone(),
+                *service.static_details.name(),
                 service.static_details.attributes().clone(),
             ));
             CallbackProgression::Continue
@@ -375,10 +375,10 @@ impl Iceoryx2PubSub {
                 {
                     continue;
                 }
-                let subscriber = self.create_subscriber(service_name.clone(), None)?;
+                let subscriber = self.create_subscriber(*service_name, None)?;
                 registration
                     .subscribers
-                    .insert(service_name.clone(), Arc::new(subscriber));
+                    .insert(*service_name, Arc::new(subscriber));
             }
         }
         Ok(())
@@ -750,7 +750,7 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
                 sink_filter,
                 MessagingPattern::PublishSubscribe,
             )?;
-            let subscriber = self.create_subscriber(service_name.clone(), Some(source_filter))?;
+            let subscriber = self.create_subscriber(service_name, Some(source_filter))?;
             registration
                 .subscribers
                 .insert(service_name, Arc::new(subscriber));
