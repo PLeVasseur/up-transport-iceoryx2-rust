@@ -14,28 +14,33 @@
 use iceoryx2::prelude::{MessagingPattern, ServiceName};
 use up_rust::{UCode, UStatus, UUri};
 
-fn encode_uuri_segments(uuri: &UUri) -> Vec<String> {
-    vec![
-        get_authority_name(uuri),
+fn encode_uuri_segments(uuri: &UUri) -> Result<Vec<String>, UStatus> {
+    Ok(vec![
+        get_authority_name(uuri)?,
         encode_hex(uuri.uentity_type_id() as u32),
         encode_hex(uuri.uentity_instance_id() as u32),
         encode_hex(uuri.uentity_major_version() as u32),
         encode_hex(uuri.resource_id() as u32),
-    ]
+    ])
 }
 
 pub(crate) fn encode_hex(value: u32) -> String {
     format!("{value:X}")
 }
 
-pub(crate) fn get_authority_name(source_uuri: &UUri) -> String {
+pub(crate) fn get_authority_name(source_uuri: &UUri) -> Result<String, UStatus> {
     if source_uuri.authority_name().is_empty() {
-        match hostname::get().unwrap().into_string() {
-            Ok(hostname) => hostname,
-            Err(_) => "unknown".to_string(),
-        }
+        hostname::get()
+            .map_err(|err| {
+                UStatus::fail_with_code(
+                    UCode::INTERNAL,
+                    format!("failed to determine hostname for iceoryx2 service name: {err}"),
+                )
+            })?
+            .into_string()
+            .map_or_else(|_| Ok("unknown".to_string()), Ok)
     } else {
-        source_uuri.authority_name()
+        Ok(source_uuri.authority_name())
     }
 }
 
@@ -55,9 +60,14 @@ pub fn compute_service_name(
             "iceoryx2 pub/sub service names require a non-empty publish source URI",
         ));
     }
-    let segments = encode_uuri_segments(source);
+    let segments = encode_uuri_segments(source)?;
     let service_name_str = format!("up/{}", join_segments(segments));
-    Ok(ServiceName::new(service_name_str.as_str()).expect("Failed to create service name"))
+    ServiceName::new(service_name_str.as_str()).map_err(|err| {
+        UStatus::fail_with_code(
+            UCode::INVALID_ARGUMENT,
+            format!("failed to create iceoryx2 service name: {err}"),
+        )
+    })
 }
 
 #[cfg(test)]

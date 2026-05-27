@@ -23,11 +23,11 @@ use iceoryx2::{
     prelude::ServiceName,
     service::ipc_threadsafe,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::io::Cursor;
 use std::mem::MaybeUninit;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 use up_rust::{
     UCode, UFrameMetadata, UStatus, UUri, UZeroCopyUninitTransport,
     transport::verify_filter_criteria,
@@ -114,6 +114,7 @@ pub struct Iceoryx2PubSub {
     /// multiple matching uProtocol listeners do not consume a single shared
     /// sample queue.
     pub subscribers: SubscriberSet<ipc_threadsafe::Service>,
+    pull_receive_queues: Mutex<HashMap<ServiceName, VecDeque<Iceoryx2RxLease>>>,
     zero_copy_listeners: ZeroCopyListenerMap,
 }
 
@@ -140,6 +141,7 @@ impl Iceoryx2PubSub {
             config,
             publishers: RwLock::new(HashMap::new()),
             subscribers: RwLock::new(HashMap::new()),
+            pull_receive_queues: Mutex::new(HashMap::new()),
             zero_copy_listeners: RwLock::new(Vec::new()),
         });
         Iceoryx2WorkerDispatcher::start_listener_worker(transport.clone());
@@ -382,6 +384,32 @@ impl Iceoryx2PubSub {
             }
         }
         Ok(())
+    }
+
+    async fn pop_queued_pull_sample(
+        &self,
+        service_name: &ServiceName,
+        sink_filter: Option<&UUri>,
+    ) -> Option<Iceoryx2RxLease> {
+        let mut queues = self.pull_receive_queues.lock().await;
+        let queue = queues.get_mut(service_name)?;
+        let index = queue
+            .iter()
+            .position(|lease| sink_matches(lease.metadata().attributes().sink(), sink_filter))?;
+        let lease = queue.remove(index);
+        if queue.is_empty() {
+            queues.remove(service_name);
+        }
+        lease
+    }
+
+    async fn queue_pull_sample(&self, service_name: ServiceName, lease: Iceoryx2RxLease) {
+        self.pull_receive_queues
+            .lock()
+            .await
+            .entry(service_name)
+            .or_default()
+            .push_back(lease);
     }
 }
 
@@ -722,6 +750,12 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
         let subscriber = self
             .get_or_create_subscriber(service_name, Some(source_filter))
             .await?;
+        if let Some(lease) = self
+            .pop_queued_pull_sample(&service_name, sink_filter)
+            .await
+        {
+            return Ok(lease);
+        }
         loop {
             let sample = subscriber
                 .receive()
@@ -729,6 +763,7 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
                 .ok_or_else(|| UStatus::fail_with_code(UCode::NOT_FOUND, "no sample available"))?;
             let lease = lease_from_sample(sample)?;
             if !sink_matches(lease.metadata().attributes().sink(), sink_filter) {
+                self.queue_pull_sample(service_name, lease).await;
                 continue;
             }
             return Ok(lease);

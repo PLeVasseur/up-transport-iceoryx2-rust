@@ -44,13 +44,14 @@ pub(crate) fn attributes_match_source_filter(attributes: &AttributeSet, filter: 
     let Some(source) = source_from_attributes(attributes) else {
         return false;
     };
-    normalized_filter(filter).matches(&source)
+    normalized_filter(filter).is_some_and(|filter| filter.matches(&source))
 }
 
 fn source_attribute_pairs(source: &UUri) -> Result<Vec<(AttributeKey, AttributeValue)>, UStatus> {
+    let authority = get_authority_name(source)?;
     Ok(vec![
         attribute(ATTR_TRANSPORT, TRANSPORT_VALUE)?,
-        attribute(ATTR_SOURCE_AUTHORITY, &get_authority_name(source))?,
+        attribute(ATTR_SOURCE_AUTHORITY, &authority)?,
         attribute(
             ATTR_SOURCE_TYPE,
             &encode_hex(source.uentity_type_id() as u32),
@@ -100,16 +101,16 @@ fn source_from_attributes(attributes: &AttributeSet) -> Option<UUri> {
     UUri::try_from_parts(authority, entity_id, version, resource).ok()
 }
 
-fn normalized_filter(filter: &UUri) -> UUri {
+fn normalized_filter(filter: &UUri) -> Option<UUri> {
     if filter.has_empty_authority() {
-        UUri::from_parts_unchecked(
-            get_authority_name(filter),
+        Some(UUri::from_parts_unchecked(
+            get_authority_name(filter).ok()?,
             filter.ue_id(),
             filter.uentity_major_version() as u32,
             filter.resource_id() as u32,
-        )
+        ))
     } else {
-        filter.clone()
+        Some(filter.clone())
     }
 }
 

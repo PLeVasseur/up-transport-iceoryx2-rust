@@ -733,7 +733,7 @@ async fn zero_copy_receive_filters_mismatched_sink() -> Result<(), Box<dyn std::
         UAttributes::new(
             UUID::build(),
             source.clone(),
-            Some(sink_b),
+            Some(sink_b.clone()),
             UMessageType::Notification,
         ),
         TestReadingWire::encoding(),
@@ -748,15 +748,35 @@ async fn zero_copy_receive_filters_mismatched_sink() -> Result<(), Box<dyn std::
         )
         .await?;
 
+    let mut sink_a_rejected = false;
     for _ in 0..100 {
         match subscriber.receive_zero_copy(&source, Some(&sink_a)).await {
-            Err(status) if status.get_code() == UCode::NOT_FOUND => return Ok(()),
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                sink_a_rejected = true;
+                break;
+            }
             Err(status) => return Err(status.into()),
             Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
         }
     }
+    if !sink_a_rejected {
+        return Err("sink A receive delivered a sink B sample".into());
+    }
 
-    Err("sink A receive delivered a sink B sample".into())
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&source, Some(&sink_b)).await {
+            Ok(rx) => {
+                assert_eq!(rx.metadata().attributes().sink(), Some(&sink_b));
+                return Ok(());
+            }
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+
+    Err("sink B sample was not preserved after mismatched sink A receive".into())
 }
 
 #[tokio::test(flavor = "multi_thread")]
