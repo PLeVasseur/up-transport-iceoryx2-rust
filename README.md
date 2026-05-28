@@ -44,7 +44,7 @@ default-initializing the application payload region:
 use up_rust::{payload::StableContainerPayload, UFrameMetadata, UZeroCopyUninitTransportExt};
 
 #[repr(C)]
-#[derive(Clone, Copy, up_rust::StablePayload)]
+#[derive(Clone, Copy, up_rust::StablePayload, up_rust::ByteBackedStablePayload)]
 #[stable_payload(type_name = "example.vehicle.VehiclePose")]
 struct VehiclePose {
     x: u64,
@@ -71,6 +71,16 @@ capacity for the hidden metadata prefix, alignment padding, and application
 payload bytes. The transport requests one deterministic worst-case sample length
 of `metadata_len + payload_len + alignment - 1`; any unused suffix is hidden
 transport padding and is never exposed through application payload views.
+
+The transport preserves the distinction between no payload and a present empty
+payload: no payload has no `PayloadEncoding`, while a present empty payload keeps
+its encoding and reports payload presence with length zero. Payload bytes with no
+encoding are rejected before send.
+
+Filtered pull receive preserves nonmatching samples in an internal per-service
+queue so another matching receive call can still observe them. The queue is not
+currently bounded by a public resource policy; deployments that rely heavily on
+mismatched pull filters should treat this as a resource consideration.
 
 ## Verification
 

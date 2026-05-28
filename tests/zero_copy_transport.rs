@@ -17,7 +17,7 @@ use protobuf::well_known_types::wrappers::StringValue;
 use tokio::{sync::mpsc, time::Duration};
 use up_rust::{
     PayloadEncoding, ProtobufPayload, UAttributes, UCode, UFrameMetadata, UMessageType, UPriority,
-    UUID, UUri, UZeroCopyUninitTransportExt,
+    UUID, UUri, UZeroCopyUninitTransport, UZeroCopyUninitTransportExt,
     payload::{
         PayloadFormat, PlacementDefault, RawBytes, StableContainerPayload, UDeserializer,
         USerializer, UWireError,
@@ -413,6 +413,109 @@ async fn static_allocation_rejects_oversized_payload_without_growth()
 
     assert_eq!(error.get_code(), UCode::RESOURCE_EXHAUSTED);
     Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_reserve_rejects_payload_without_encoding()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-missing-encoding-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9021)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+
+    let result = publisher
+        .reserve(UFrameMetadata::publish(topic), 1, 1)
+        .await;
+    match result {
+        Ok(_) => panic!("payload bytes without encoding must be rejected"),
+        Err(error) => assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT),
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_reserve_uninit_rejects_payload_without_encoding()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-uninit-missing-encoding-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9022)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+
+    let result = publisher
+        .reserve_uninit(UFrameMetadata::publish(topic), 1, 1)
+        .await;
+    match result {
+        Ok(_) => panic!("uninit payload bytes without encoding must be rejected"),
+        Err(error) => assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT),
+    }
+    Ok(())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_transport_preserves_present_empty_payload()
+-> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-present-empty-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9023)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+
+    let _ = subscriber.receive_zero_copy(&topic, None).await;
+
+    let loan = publisher
+        .reserve(
+            UFrameMetadata::publish(topic.clone()).with_encoding(RawBytes::encoding()),
+            0,
+            1,
+        )
+        .await?;
+    publisher.send_zero_copy(loan).await?;
+
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&topic, None).await {
+            Ok(rx) => {
+                assert!(rx.has_payload());
+                assert_eq!(rx.payload_len(), 0);
+                assert_eq!(rx.metadata().encoding(), Some(&RawBytes::encoding()));
+                return Ok(());
+            }
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+
+    Err("timed out waiting for a present-empty payload sample".into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_transport_preserves_no_payload() -> Result<(), Box<dyn std::error::Error>> {
+    let authority = format!("iox-no-payload-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9024)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+
+    let _ = subscriber.receive_zero_copy(&topic, None).await;
+
+    let loan = publisher
+        .reserve(UFrameMetadata::publish(topic.clone()), 0, 1)
+        .await?;
+    publisher.send_zero_copy(loan).await?;
+
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&topic, None).await {
+            Ok(rx) => {
+                assert!(!rx.has_payload());
+                assert_eq!(rx.payload_len(), 0);
+                assert!(rx.metadata().encoding().is_none());
+                return Ok(());
+            }
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+
+    Err("timed out waiting for a no-payload sample".into())
 }
 
 #[tokio::test(flavor = "multi_thread")]
