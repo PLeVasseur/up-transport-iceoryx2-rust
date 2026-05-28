@@ -15,7 +15,6 @@ use std::str::FromStr;
 
 use up_rust::{
     UCode, UUri,
-    payload::StableContainerPayload,
     zero_copy::{ULoanedContiguousZeroCopyRxFrame, UZeroCopyRxFrame, UZeroCopyTransport},
 };
 use up_transport_iceoryx2_rust::{MessagingPattern, transport::UTransportIceoryx2};
@@ -38,13 +37,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match transport.receive_zero_copy(&topic, None).await {
             Ok(rx) => {
-                let pose = rx
-                    .borrow_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
-                    )?;
+                let pose = rx.borrow_stable_payload::<VehiclePose>()?;
                 println!(
-                    "received stable shared-memory pose [source: {}, loan kind: {:?}, pose: {:?}]",
+                    "received stable shared-memory pose [source: {}, payload provenance: {:?}, pose: {:?}]",
                     rx.metadata().source().to_uri(false),
-                    rx.payload_loan_kind(),
+                    rx.payload_loan_provenance()?,
                     pose
                 );
             }

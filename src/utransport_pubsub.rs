@@ -29,11 +29,11 @@ use std::mem::MaybeUninit;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use up_rust::{
-    UCode, UFrameMetadata, UStatus, UUri, UZeroCopyUninitTransport,
+    UCode, UFrameMetadata, UStatus, UTxLoanSpec, UUri, UZeroCopyUninitTransport,
     transport::verify_filter_criteria,
     validate_frame_metadata_for_payload,
     zero_copy::{
-        LoanedPayload, LoanedPayloadUninitMut, PayloadLoanKind, UContiguousZeroCopyRxFrame,
+        LoanedPayload, LoanedPayloadUninitMut, PayloadLoanProvenance, UContiguousZeroCopyRxFrame,
         ULoanedContiguousZeroCopyRxFrame, UTxBuffer, UUninitTxBuffer, UZeroCopyListener,
         UZeroCopyRxFrame, UZeroCopyTransport,
     },
@@ -458,13 +458,13 @@ impl Iceoryx2PubSubConfig {
 
 /// iceoryx2 transmit loan for one native uProtocol frame.
 ///
-/// Values are returned by [`UZeroCopyTransport::reserve`] for
+/// Values are returned by [`UZeroCopyTransport::loan_tx`] for
 /// [`Iceoryx2PubSub`]. The exposed payload range is aligned for the selected
 /// serializer and excludes the hidden metadata prefix. After
 /// [`UZeroCopyTransport::send_zero_copy`] consumes the loan, callers must treat
 /// the underlying storage as no longer accessible.
 ///
-/// [`UZeroCopyTransport::reserve`]: up_rust::zero_copy::UZeroCopyTransport::reserve
+/// [`UZeroCopyTransport::loan_tx`]: up_rust::zero_copy::UZeroCopyTransport::loan_tx
 /// [`UZeroCopyTransport::send_zero_copy`]: up_rust::zero_copy::UZeroCopyTransport::send_zero_copy
 pub struct Iceoryx2TxLoan {
     metadata: UFrameMetadata,
@@ -507,6 +507,10 @@ impl UTxBuffer for Iceoryx2TxLoan {
             .get_mut(self.payload_offset..end)
             .expect("loaned payload layout should be valid")
     }
+
+    fn payload_loan_provenance(&self) -> PayloadLoanProvenance {
+        PayloadLoanProvenance::SharedMemory
+    }
 }
 
 impl UUninitTxBuffer for Iceoryx2UninitTxLoan {
@@ -520,8 +524,8 @@ impl UUninitTxBuffer for Iceoryx2UninitTxLoan {
         self.payload_len
     }
 
-    fn payload_loan_kind(&self) -> PayloadLoanKind {
-        PayloadLoanKind::SharedMemory
+    fn payload_loan_provenance(&self) -> PayloadLoanProvenance {
+        PayloadLoanProvenance::SharedMemory
     }
 
     fn payload_uninit_mut(&mut self) -> LoanedPayloadUninitMut<'_> {
@@ -536,7 +540,7 @@ impl UUninitTxBuffer for Iceoryx2UninitTxLoan {
             .expect("loaned payload layout should be valid");
         // SAFETY:
         // - The range was checked against the iceoryx2 sample payload above and
-        //   is the exact visible application payload range computed at reserve.
+        //   is the exact visible application payload range computed from the loan spec.
         // - `&mut self` gives exclusive access to the sample while the loaned
         //   uninit payload view exists.
         // - The backing storage is an iceoryx2 shared-memory sample.
@@ -544,7 +548,9 @@ impl UUninitTxBuffer for Iceoryx2UninitTxLoan {
         //   the backing slice must be valid for writes and "must not be accessed
         //   through any other pointer" for the returned lifetime; the mutable
         //   sample borrow supplies that exclusivity.
-        unsafe { LoanedPayloadUninitMut::new_unchecked(payload, PayloadLoanKind::SharedMemory) }
+        unsafe {
+            LoanedPayloadUninitMut::new_unchecked(payload, PayloadLoanProvenance::SharedMemory)
+        }
     }
 
     unsafe fn assume_payload_init(self) -> Self::Initialized {
@@ -660,7 +666,7 @@ impl ULoanedContiguousZeroCopyRxFrame for Iceoryx2RxLease {
         //   a borrowed slice must be valid for reads and contained within one
         //   allocation; the iceoryx2 sample lease supplies that external
         //   provenance.
-        Ok(unsafe { LoanedPayload::new_unchecked(payload, PayloadLoanKind::SharedMemory) })
+        Ok(unsafe { LoanedPayload::new_unchecked(payload, PayloadLoanProvenance::SharedMemory) })
     }
 }
 
@@ -669,19 +675,11 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
     type Tx = Iceoryx2TxLoan;
     type Rx = Iceoryx2RxLease;
 
-    async fn reserve(
-        &self,
-        header: UFrameMetadata,
-        payload_len: usize,
-        alignment: usize,
-    ) -> Result<Self::Tx, UStatus> {
+    async fn loan_tx(&self, spec: UTxLoanSpec) -> Result<Self::Tx, UStatus> {
+        let header = spec.metadata().clone();
+        let payload_len = spec.payload_len();
+        let alignment = spec.payload_alignment();
         validate_alignment(alignment)?;
-        if header.encoding().is_none() && payload_len != 0 {
-            return Err(UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
-                "message payload is present but payload encoding is absent",
-            ));
-        }
         validate_frame_metadata_for_payload(&header, header.encoding().is_some())?;
         let source = header.attributes().source();
         let service_name = compute_service_name(
@@ -828,19 +826,11 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
 impl UZeroCopyUninitTransport for Iceoryx2PubSub {
     type UninitTx = Iceoryx2UninitTxLoan;
 
-    async fn reserve_uninit(
-        &self,
-        header: UFrameMetadata,
-        payload_len: usize,
-        alignment: usize,
-    ) -> Result<Self::UninitTx, UStatus> {
+    async fn loan_uninit_tx(&self, spec: UTxLoanSpec) -> Result<Self::UninitTx, UStatus> {
+        let header = spec.metadata().clone();
+        let payload_len = spec.payload_len();
+        let alignment = spec.payload_alignment();
         validate_alignment(alignment)?;
-        if header.encoding().is_none() && payload_len != 0 {
-            return Err(UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
-                "message payload is present but payload encoding is absent",
-            ));
-        }
         validate_frame_metadata_for_payload(&header, header.encoding().is_some())?;
         let source = header.attributes().source();
         let service_name = compute_service_name(

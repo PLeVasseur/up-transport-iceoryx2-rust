@@ -1,9 +1,9 @@
 # up-transport-iceoryx2-rust
 Rust uTransport implementation for iceoryx2
 
-This crate implements the native `up-rust` zero-copy transport capability. Payload serializers write into an iceoryx2 transmit loan through `UTxBuffer`, and subscribers receive lease-backed frames through `UZeroCopyRxFrame`. Native frame metadata is fixed when the loan is reserved, then split between the fixed user header and an implementation metadata prefix so `UAttributes` and `PayloadEncoding` are preserved without exposing the prefix as application payload bytes.
+This crate implements the native `up-rust` direct zero-copy transport capability. Transmit loans are requested with `UTxLoanSpec`; payload serializers write into an iceoryx2 transmit loan through `UTxBuffer`, and subscribers receive lease-backed frames through `UZeroCopyRxFrame`. Native frame metadata is fixed when the loan is created, then split between the fixed user header and an implementation metadata prefix so `UAttributes` and `PayloadEncoding` are preserved without exposing the prefix as application payload bytes.
 
-`Iceoryx2PubSub` does not implement `UOwnedTransport` directly. Use `UOwnedFrameEndpoint::from_zero_copy_copying_adapter` when an owned-frame boundary is intentional; that adapter copies at the boundary.
+`Iceoryx2PubSub` does not implement `UOwnedTransport` directly. Use `UOwnedFrameEndpoint::from_zero_copy_copying_adapter` when an owned-frame boundary is intentional; that adapter copies at the boundary and is not a direct zero-copy path.
 
 ## How The Pieces Fit
 
@@ -28,14 +28,14 @@ async fn send<T>(transport: &T, metadata: UFrameMetadata) -> Result<(), up_rust:
 where
     T: up_rust::zero_copy::UZeroCopyTransport,
 {
-let payload: &[u8] = b"payload";
-transport
-    .send_serialized_zero_copy::<RawBytes, _>(metadata, &payload)
-    .await
+    let payload: &[u8] = b"payload";
+    transport
+        .send_serialized_zero_copy::<RawBytes, _>(metadata, &payload)
+        .await
 }
 ```
 
-On receive, use `UZeroCopyRxFrame::deserialize_from_reader::<Codec, T>()` for generic leases or `UContiguousZeroCopyRxFrame::deserialize_borrowed::<Codec, T>()` when the decoded value needs to borrow from the contiguous iceoryx2 sample.
+On receive, use `UZeroCopyRxFrame::deserialize_from_reader::<Codec, T>()` for generic leases or `UContiguousZeroCopyRxFrame::deserialize_borrowed::<Codec, T>()` when the decoded value needs to borrow from the contiguous iceoryx2 sample. Stable-container typed receive is loan-backed only: use `ULoanedContiguousZeroCopyRxFrame::borrow_stable_payload<T>()`, which validates the stable-container encoding, size, alignment, and receive-lease lifetime before returning `&T`.
 
 Stable typed payloads can be constructed in shared memory without first
 default-initializing the application payload region:
@@ -63,6 +63,8 @@ where
         .await
 }
 ```
+
+The direct stable-container proof for this transport is `send_uninit_loaned_payload_as::<StableContainerPayload<T>, T>` on TX followed by `receive_zero_copy` and `borrow_stable_payload<T>()` on RX. Successful loan-backed payload views report `PayloadLoanProvenance::SharedMemory` diagnostically; the stable borrow safety checks do not depend on that provenance value.
 
 Use `Iceoryx2PubSubConfig::static_allocation(max_slice_len)` with
 `UTransportIceoryx2::build_with_config` for deterministic runs that fail instead

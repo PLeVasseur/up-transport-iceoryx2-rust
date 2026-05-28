@@ -21,9 +21,10 @@ use up_rust::{UCode, UStatus};
 ///
 /// iceoryx2 support in this crate is currently implemented for
 /// [`MessagingPattern::PublishSubscribe`]. The returned [`Iceoryx2PubSub`]
-/// implements the true zero-copy transport capability. Use
+/// implements the direct true zero-copy transport capability. Use
 /// `up_rust::transport::UOwnedFrameEndpoint::from_zero_copy_copying_adapter`
-/// when an owned-frame copy boundary is intentional.
+/// when an owned-frame copy boundary is intentional; that adapter is not a
+/// direct zero-copy path.
 pub struct UTransportIceoryx2 {}
 
 impl UTransportIceoryx2 {

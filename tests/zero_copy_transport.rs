@@ -17,15 +17,15 @@ use protobuf::well_known_types::wrappers::StringValue;
 use tokio::{sync::mpsc, time::Duration};
 use up_rust::{
     PayloadEncoding, ProtobufPayload, UAttributes, UCode, UFrameMetadata, UMessageType, UPriority,
-    UUID, UUri, UZeroCopyUninitTransport, UZeroCopyUninitTransportExt,
+    UTxLoanSpec, UUID, UUri, UZeroCopyUninitTransportExt,
     payload::{
-        PayloadFormat, PlacementDefault, RawBytes, StableContainerPayload, UDeserializer,
-        USerializer, UWireError,
+        PayloadFormat, PayloadLayout, PlacementDefault, RawBytes, StableContainerPayload,
+        UDeserializer, USerializer, UWireError,
     },
     test_util::zero_copy_conformance,
     zero_copy::{
-        PayloadLoanKind, UContiguousZeroCopyRxFrame, ULoanedContiguousZeroCopyRxFrame, UTxBuffer,
-        UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport, UZeroCopyTransportExt,
+        PayloadLoanProvenance, UContiguousZeroCopyRxFrame, ULoanedContiguousZeroCopyRxFrame,
+        UTxBuffer, UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport, UZeroCopyTransportExt,
     },
 };
 
@@ -323,10 +323,7 @@ async fn zero_copy_transport_round_trips_stable_container_payload()
                     mem::size_of::<VehiclePose>(),
                     mem::align_of::<VehiclePose>(),
                 )?;
-                let pose = zero_copy_conformance::borrow_loaned_payload_as::<
-                    StableContainerPayload<VehiclePose>,
-                    VehiclePose,
-                >(&rx)?;
+                let pose = zero_copy_conformance::borrow_stable_payload::<VehiclePose>(&rx)?;
                 assert_eq!(pose, &expected);
                 sender.abort();
                 return Ok(());
@@ -370,11 +367,11 @@ async fn zero_copy_transport_round_trips_stable_container_uninit_payload()
     for _ in 0..100 {
         match subscriber.receive_zero_copy(&topic, None).await {
             Ok(rx) => {
-                assert_eq!(rx.payload_loan_kind()?, PayloadLoanKind::SharedMemory);
-                let pose = zero_copy_conformance::borrow_loaned_payload_as::<
-                    StableContainerPayload<VehiclePose>,
-                    VehiclePose,
-                >(&rx)?;
+                assert_eq!(
+                    rx.payload_loan_provenance()?,
+                    PayloadLoanProvenance::SharedMemory
+                );
+                let pose = zero_copy_conformance::borrow_stable_payload::<VehiclePose>(&rx)?;
                 assert_eq!(pose, &expected);
                 sender.abort();
                 return Ok(());
@@ -400,13 +397,11 @@ async fn static_allocation_rejects_oversized_payload_without_growth()
         Iceoryx2PubSubConfig::static_allocation(1),
     )?;
 
-    let result = publisher
-        .reserve(
-            UFrameMetadata::publish(topic).with_encoding(RawBytes::encoding()),
-            64,
-            1,
-        )
-        .await;
+    let spec = UTxLoanSpec::payload(
+        UFrameMetadata::publish(topic).with_encoding(RawBytes::encoding()),
+        PayloadLayout::new(64, 1)?,
+    )?;
+    let result = publisher.loan_tx(spec).await;
     let Err(error) = result else {
         panic!("static iceoryx2 allocation should reject oversized sample");
     };
@@ -416,15 +411,12 @@ async fn static_allocation_rejects_oversized_payload_without_growth()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn zero_copy_reserve_rejects_payload_without_encoding()
+async fn zero_copy_loan_spec_rejects_payload_without_encoding()
 -> Result<(), Box<dyn std::error::Error>> {
     let authority = format!("iox-missing-encoding-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9021)?;
-    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
 
-    let result = publisher
-        .reserve(UFrameMetadata::publish(topic), 1, 1)
-        .await;
+    let result = UTxLoanSpec::payload(UFrameMetadata::publish(topic), PayloadLayout::new(1, 1)?);
     match result {
         Ok(_) => panic!("payload bytes without encoding must be rejected"),
         Err(error) => assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT),
@@ -433,15 +425,12 @@ async fn zero_copy_reserve_rejects_payload_without_encoding()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn zero_copy_reserve_uninit_rejects_payload_without_encoding()
+async fn zero_copy_uninit_loan_spec_rejects_payload_without_encoding()
 -> Result<(), Box<dyn std::error::Error>> {
     let authority = format!("iox-uninit-missing-encoding-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9022)?;
-    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
 
-    let result = publisher
-        .reserve_uninit(UFrameMetadata::publish(topic), 1, 1)
-        .await;
+    let result = UTxLoanSpec::payload(UFrameMetadata::publish(topic), PayloadLayout::new(1, 1)?);
     match result {
         Ok(_) => panic!("uninit payload bytes without encoding must be rejected"),
         Err(error) => assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT),
@@ -459,13 +448,10 @@ async fn zero_copy_transport_preserves_present_empty_payload()
 
     let _ = subscriber.receive_zero_copy(&topic, None).await;
 
-    let loan = publisher
-        .reserve(
-            UFrameMetadata::publish(topic.clone()).with_encoding(RawBytes::encoding()),
-            0,
-            1,
-        )
-        .await?;
+    let spec = UTxLoanSpec::present_empty_payload(
+        UFrameMetadata::publish(topic.clone()).with_encoding(RawBytes::encoding()),
+    )?;
+    let loan = publisher.loan_tx(spec).await?;
     publisher.send_zero_copy(loan).await?;
 
     for _ in 0..100 {
@@ -495,9 +481,8 @@ async fn zero_copy_transport_preserves_no_payload() -> Result<(), Box<dyn std::e
 
     let _ = subscriber.receive_zero_copy(&topic, None).await;
 
-    let loan = publisher
-        .reserve(UFrameMetadata::publish(topic.clone()), 0, 1)
-        .await?;
+    let spec = UTxLoanSpec::no_payload(UFrameMetadata::publish(topic.clone()))?;
+    let loan = publisher.loan_tx(spec).await?;
     publisher.send_zero_copy(loan).await?;
 
     for _ in 0..100 {
@@ -549,11 +534,11 @@ async fn static_allocation_round_trips_stable_container_uninit_payload()
     for _ in 0..100 {
         match subscriber.receive_zero_copy(&topic, None).await {
             Ok(rx) => {
-                assert_eq!(rx.payload_loan_kind()?, PayloadLoanKind::SharedMemory);
-                let pose = zero_copy_conformance::borrow_loaned_payload_as::<
-                    StableContainerPayload<VehiclePose>,
-                    VehiclePose,
-                >(&rx)?;
+                assert_eq!(
+                    rx.payload_loan_provenance()?,
+                    PayloadLoanProvenance::SharedMemory
+                );
+                let pose = zero_copy_conformance::borrow_stable_payload::<VehiclePose>(&rx)?;
                 assert_eq!(pose, &expected);
                 sender.abort();
                 return Ok(());
@@ -586,14 +571,15 @@ async fn static_allocation_honors_high_alignment_padding_without_growth()
         sensor_id: 19,
         counter: 512,
     };
-    let mut loan = publisher
-        .reserve(
-            UFrameMetadata::publish(topic.clone())
-                .with_encoding(AlignedTestReadingWire::encoding()),
-            <TestReading as USerializer<AlignedTestReadingWire>>::encoded_len(&reading),
-            <TestReading as USerializer<AlignedTestReadingWire>>::ALIGNMENT,
-        )
-        .await?;
+    let layout = PayloadLayout::new(
+        <TestReading as USerializer<AlignedTestReadingWire>>::encoded_len(&reading),
+        <TestReading as USerializer<AlignedTestReadingWire>>::ALIGNMENT,
+    )?;
+    let spec = UTxLoanSpec::payload(
+        UFrameMetadata::publish(topic.clone()).with_encoding(AlignedTestReadingWire::encoding()),
+        layout,
+    )?;
+    let mut loan = publisher.loan_tx(spec).await?;
     assert_eq!(
         loan.payload_mut().as_ptr() as usize
             % <TestReading as USerializer<AlignedTestReadingWire>>::ALIGNMENT,
@@ -608,7 +594,10 @@ async fn static_allocation_honors_high_alignment_padding_without_growth()
     for _ in 0..100 {
         match subscriber.receive_zero_copy(&topic, None).await {
             Ok(rx) => {
-                assert_eq!(rx.payload_loan_kind()?, PayloadLoanKind::SharedMemory);
+                assert_eq!(
+                    rx.payload_loan_provenance()?,
+                    PayloadLoanProvenance::SharedMemory
+                );
                 assert_eq!(
                     rx.contiguous_payload().as_ptr() as usize
                         % <TestReading as USerializer<AlignedTestReadingWire>>::ALIGNMENT,
@@ -640,7 +629,7 @@ async fn static_allocation_rejects_metadata_heavy_frame_without_growth()
         .with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00");
     let metadata = UFrameMetadata::without_payload_encoding(attributes);
 
-    let result = publisher.reserve(metadata, 0, 1).await;
+    let result = publisher.loan_tx(UTxLoanSpec::no_payload(metadata)?).await;
     let Err(error) = result else {
         panic!("static iceoryx2 allocation should reject metadata-only frames over capacity");
     };
@@ -666,24 +655,22 @@ async fn zero_copy_transport_rejects_stable_container_wrong_type_name_metadata()
         mem::size_of::<VehiclePose>(),
         mem::align_of::<VehiclePose>(),
     );
-    let mut loan = publisher
-        .reserve(
-            UFrameMetadata::publish(topic.clone()).with_encoding(encoding),
+    let spec = UTxLoanSpec::payload(
+        UFrameMetadata::publish(topic.clone()).with_encoding(encoding),
+        PayloadLayout::new(
             mem::size_of::<VehiclePose>(),
             mem::align_of::<VehiclePose>(),
-        )
-        .await?;
+        )?,
+    )?;
+    let mut loan = publisher.loan_tx(spec).await?;
     loan.payload_mut().copy_from_slice(bytes_of_pose(&pose));
     publisher.send_zero_copy(loan).await?;
 
     for _ in 0..100 {
         match subscriber.receive_zero_copy(&topic, None).await {
             Ok(rx) => {
-                let error = zero_copy_conformance::borrow_loaned_payload_as::<
-                    StableContainerPayload<VehiclePose>,
-                    VehiclePose,
-                >(&rx)
-                .unwrap_err();
+                let error =
+                    zero_copy_conformance::borrow_stable_payload::<VehiclePose>(&rx).unwrap_err();
                 assert!(matches!(
                     error,
                     UWireError::IncompatibleStablePayload { actual, .. }
@@ -702,7 +689,7 @@ async fn zero_copy_transport_rejects_stable_container_wrong_type_name_metadata()
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn zero_copy_reserve_honors_payload_alignment() -> Result<(), Box<dyn std::error::Error>> {
+async fn zero_copy_loan_tx_honors_payload_alignment() -> Result<(), Box<dyn std::error::Error>> {
     let authority = format!("iox-align-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9010)?;
     let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
@@ -714,14 +701,15 @@ async fn zero_copy_reserve_honors_payload_alignment() -> Result<(), Box<dyn std:
         sensor_id: 10,
         counter: 64,
     };
-    let mut loan = publisher
-        .reserve(
-            UFrameMetadata::publish(topic.clone())
-                .with_encoding(AlignedTestReadingWire::encoding()),
-            <TestReading as USerializer<AlignedTestReadingWire>>::encoded_len(&reading),
-            <TestReading as USerializer<AlignedTestReadingWire>>::ALIGNMENT,
-        )
-        .await?;
+    let layout = PayloadLayout::new(
+        <TestReading as USerializer<AlignedTestReadingWire>>::encoded_len(&reading),
+        <TestReading as USerializer<AlignedTestReadingWire>>::ALIGNMENT,
+    )?;
+    let spec = UTxLoanSpec::payload(
+        UFrameMetadata::publish(topic.clone()).with_encoding(AlignedTestReadingWire::encoding()),
+        layout,
+    )?;
+    let mut loan = publisher.loan_tx(spec).await?;
     assert_eq!(loan.payload_mut().as_ptr() as usize % 64, 0);
     <TestReading as USerializer<AlignedTestReadingWire>>::serialize_into(
         &reading,
