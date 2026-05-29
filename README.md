@@ -1,7 +1,13 @@
 # up-transport-iceoryx2-rust
 Rust uTransport implementation for iceoryx2
 
-This crate implements the native `up-rust` direct zero-copy transport capability. Transmit loans are requested with `UTxLoanSpec`; payload serializers write into an iceoryx2 transmit loan through `UTxBuffer`, and subscribers receive lease-backed frames through `UZeroCopyRxFrame`. Native frame metadata is fixed when the loan is created, then split between the fixed user header and an implementation metadata prefix so `UAttributes` and `PayloadEncoding` are preserved without exposing the prefix as application payload bytes.
+This crate implements the native `up-rust` direct zero-copy transport capability. Transmit loans are requested with `UTxLoanSpec`; payload serializers write into an iceoryx2 transmit loan through `UTxBuffer`, and subscribers receive lease-backed frames through `UZeroCopyRxLease`. Native frame metadata is fixed when the loan is created, then split between the fixed user header and an implementation metadata prefix so `UAttributes` and `PayloadEncoding` are preserved without exposing the prefix as application payload bytes.
+
+Native-frame conformance coverage includes `UFM1` prefix validation, standard and
+custom payload encoding preservation, stable-container metadata preservation,
+rejection of payload bytes without encoding metadata, exact application payload
+views that exclude the prefix and padding, and loan-backed stable-container
+borrowing from the iceoryx2 shared-memory receive lease.
 
 `Iceoryx2PubSub` does not implement `UOwnedTransport` directly. Use `UOwnedFrameEndpoint::from_zero_copy_copying_adapter` when an owned-frame boundary is intentional; that adapter copies at the boundary and is not a direct zero-copy path.
 
@@ -35,7 +41,7 @@ where
 }
 ```
 
-On receive, use `UZeroCopyRxFrame::deserialize_from_reader::<Codec, T>()` for generic leases or `UContiguousZeroCopyRxFrame::deserialize_borrowed::<Codec, T>()` when the decoded value needs to borrow from the contiguous iceoryx2 sample. Stable-container typed receive is loan-backed only: use `ULoanedContiguousZeroCopyRxFrame::borrow_stable_payload<T>()`, which validates the stable-container encoding, size, alignment, and receive-lease lifetime before returning `&T`.
+On receive, use `UFrameView::deserialize_from_reader::<Codec, T>()` for generic leases or `UContiguousZeroCopyRxFrame::deserialize_borrowed::<Codec, T>()` when the decoded value needs to borrow from the contiguous iceoryx2 sample. Stable-container typed receive is loan-backed only: use `ULoanedContiguousZeroCopyRxFrame::borrow_stable_payload<T>()`, which validates the stable-container encoding, size, alignment, and receive-lease lifetime before returning `&T`.
 
 Stable typed payloads can be constructed in shared memory without first
 default-initializing the application payload region:

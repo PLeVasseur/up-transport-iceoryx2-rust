@@ -25,7 +25,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     for _ in 0..50 {
         transport
             .send_serialized_zero_copy::<RawBytes, _>(
-                UFrameMetadata::publish(topic.clone()),
+                UFrameMetadata::try_publish(topic.clone())?,
                 &&payload[..],
             )
             .await?;

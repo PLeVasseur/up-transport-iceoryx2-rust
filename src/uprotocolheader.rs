@@ -166,7 +166,7 @@ impl UProtocolHeader {
             )?)
         };
         let mut attributes =
-            UAttributes::new(id, source, sink, byte_to_message_type(self.message_type)?)
+            UAttributes::new_unchecked(id, source, sink, byte_to_message_type(self.message_type)?)
                 .with_priority(byte_to_priority(self.priority)?);
         if self.ttl_present != 0 {
             attributes = attributes.with_ttl(self.ttl);
@@ -193,7 +193,7 @@ impl UProtocolHeader {
         if let Some(token) = metadata.token {
             attributes = attributes.with_token(token);
         }
-        Ok(UFrameMetadata::new(attributes, metadata.encoding))
+        Ok(UFrameMetadata::new_unchecked(attributes, metadata.encoding))
     }
 
     pub(crate) fn payload_layout(
@@ -503,7 +503,7 @@ mod tests {
     fn frame_metadata_round_trips_authorities_via_prefix() {
         let source = UUri::try_from_parts(&"a".repeat(128), 0x4210, 1, 0x8001).unwrap();
         let sink = UUri::try_from_parts(&"b".repeat(128), 0x4210, 1, 0).unwrap();
-        let attributes = UAttributes::new(
+        let attributes = UAttributes::new_unchecked(
             UUID::build(),
             source.clone(),
             Some(sink.clone()),
@@ -511,7 +511,7 @@ mod tests {
         )
         .with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00")
         .with_token("test-token");
-        let metadata = UFrameMetadata::new(
+        let metadata = UFrameMetadata::new_unchecked(
             attributes,
             PayloadEncoding::custom("json-reading", "application/json"),
         );
@@ -539,7 +539,7 @@ mod tests {
         let sink = UUri::try_from_parts("service", 0xB8000, 1, 0).unwrap();
         let request_id = UUID::build();
         let attributes =
-            UAttributes::new(UUID::build(), source, Some(sink), UMessageType::Response)
+            UAttributes::new_unchecked(UUID::build(), source, Some(sink), UMessageType::Response)
                 .with_priority(UPriority::CS5)
                 .with_ttl(3_601)
                 .with_request_id(request_id)
@@ -547,7 +547,7 @@ mod tests {
                 .with_token("token")
                 .with_permission_level(7)
                 .with_comm_status(UCode::UNAVAILABLE);
-        let metadata = UFrameMetadata::new(
+        let metadata = UFrameMetadata::new_unchecked(
             attributes,
             PayloadEncoding::custom("custom-json", "application/custom+json"),
         );
@@ -567,11 +567,14 @@ mod tests {
         let expired_id = UUID::from_u64_pair(0x018D_548E_A8E0_7000, 0x8000_0000_0000_0000)
             .expect("valid expired UUID");
         let source = UUri::try_from_parts("vehicle", 0xA8000, 2, 0x8001).unwrap();
-        let attributes = UAttributes::new(expired_id, source, None, UMessageType::Publish)
-            .with_priority(UPriority::CS1)
-            .with_ttl(1);
-        let metadata =
-            UFrameMetadata::new(attributes, PayloadEncoding::standard(UPayloadFormat::Raw));
+        let attributes =
+            UAttributes::new_unchecked(expired_id, source, None, UMessageType::Publish)
+                .with_priority(UPriority::CS1)
+                .with_ttl(1);
+        let metadata = UFrameMetadata::new_unchecked(
+            attributes,
+            PayloadEncoding::standard(UPayloadFormat::Raw),
+        );
         let prefix = encode_frame_metadata(&metadata).unwrap();
         let mut user_header = UProtocolHeader::default();
         user_header
@@ -585,9 +588,11 @@ mod tests {
 
     #[test]
     fn payload_layout_accepts_trailing_hidden_padding() {
-        let metadata =
-            UFrameMetadata::publish(UUri::try_from_parts("vehicle", 0xA8000, 2, 0x8001).unwrap())
-                .with_encoding(PayloadEncoding::standard(UPayloadFormat::Raw));
+        let metadata = UFrameMetadata::try_publish(
+            UUri::try_from_parts("vehicle", 0xA8000, 2, 0x8001).unwrap(),
+        )
+        .unwrap()
+        .with_encoding(PayloadEncoding::standard(UPayloadFormat::Raw));
         let prefix = encode_frame_metadata(&metadata).unwrap();
         let mut user_header = UProtocolHeader::default();
         user_header
@@ -604,9 +609,11 @@ mod tests {
 
     #[test]
     fn payload_layout_rejects_sample_shorter_than_visible_payload() {
-        let metadata =
-            UFrameMetadata::publish(UUri::try_from_parts("vehicle", 0xA8000, 2, 0x8001).unwrap())
-                .with_encoding(PayloadEncoding::standard(UPayloadFormat::Raw));
+        let metadata = UFrameMetadata::try_publish(
+            UUri::try_from_parts("vehicle", 0xA8000, 2, 0x8001).unwrap(),
+        )
+        .unwrap()
+        .with_encoding(PayloadEncoding::standard(UPayloadFormat::Raw));
         let prefix = encode_frame_metadata(&metadata).unwrap();
         let mut user_header = UProtocolHeader::default();
         user_header
@@ -631,8 +638,10 @@ mod tests {
 
     #[test]
     fn frame_metadata_rejects_trailing_prefix_bytes() {
-        let metadata =
-            UFrameMetadata::publish(UUri::try_from_parts("vehicle", 0xA8000, 2, 0x8001).unwrap());
+        let metadata = UFrameMetadata::try_publish(
+            UUri::try_from_parts("vehicle", 0xA8000, 2, 0x8001).unwrap(),
+        )
+        .unwrap();
         let mut prefix = encode_frame_metadata(&metadata).unwrap();
         prefix.push(0xff);
 

@@ -13,7 +13,9 @@
 
 use std::str::FromStr;
 
-use up_rust::{UFrameMetadata, UUri, UZeroCopyUninitTransportExt, payload::StableContainerPayload};
+use up_rust::{
+    UFrameMetadata, UUri, payload::StableContainerPayload, zero_copy::UZeroCopyUninitTransportExt,
+};
 use up_transport_iceoryx2_rust::{MessagingPattern, transport::UTransportIceoryx2};
 
 #[repr(C)]
@@ -38,7 +40,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         };
         transport
             .send_uninit_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
-                UFrameMetadata::publish(topic.clone()),
+                UFrameMetadata::try_publish(topic.clone())?,
                 |slot| Ok(slot.write(pose)),
             )
             .await?;

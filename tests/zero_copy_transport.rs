@@ -20,15 +20,16 @@ use tokio::{
 };
 use up_rust::{
     PayloadEncoding, ProtobufPayload, UAttributes, UCode, UFrameMetadata, UMessageType, UPriority,
-    UTxLoanSpec, UUID, UUri, UZeroCopyUninitTransportExt,
+    UUID, UUri,
     payload::{
         PayloadFormat, PayloadLayout, PlacementDefault, RawBytes, StableContainerPayload,
         UDeserializer, USerializer, UWireError,
     },
     test_util::zero_copy_conformance,
     zero_copy::{
-        PayloadLoanProvenance, UContiguousZeroCopyRxFrame, ULoanedContiguousZeroCopyRxFrame,
-        UTxBuffer, UZeroCopyListener, UZeroCopyRxFrame, UZeroCopyTransport, UZeroCopyTransportExt,
+        PayloadLoanProvenance, UContiguousZeroCopyRxFrame, UFrameView,
+        ULoanedContiguousZeroCopyRxFrame, UTxBuffer, UTxLoanSpec, UZeroCopyListener,
+        UZeroCopyTransport, UZeroCopyTransportExt, UZeroCopyUninitTransportExt,
     },
 };
 
@@ -170,6 +171,10 @@ async fn iceoryx2_test_guard() -> MutexGuard<'static, ()> {
     ICEORYX2_TEST_MUTEX.lock().await
 }
 
+fn publish_metadata(topic: UUri) -> UFrameMetadata {
+    UFrameMetadata::try_publish(topic).expect("valid publish metadata")
+}
+
 #[async_trait::async_trait]
 impl UZeroCopyListener<Iceoryx2RxLease> for LeaseSender {
     async fn on_receive_zero_copy(&self, frame: Iceoryx2RxLease) {
@@ -205,7 +210,7 @@ async fn zero_copy_transport_round_trips_custom_payload_codec()
         for _ in 0..50 {
             publisher
                 .send_serialized_zero_copy::<TestReadingWire, _>(
-                    UFrameMetadata::publish(send_topic.clone()),
+                    publish_metadata(send_topic.clone()),
                     &send_reading,
                 )
                 .await?;
@@ -255,7 +260,7 @@ async fn zero_copy_transport_round_trips_protobuf_payload_codec()
         for _ in 0..50 {
             publisher
                 .send_serialized_zero_copy::<ProtobufPayload, _>(
-                    UFrameMetadata::publish(send_topic.clone()),
+                    publish_metadata(send_topic.clone()),
                     &send_payload,
                 )
                 .await?;
@@ -307,7 +312,7 @@ async fn zero_copy_transport_round_trips_stable_container_payload()
         for _ in 0..50 {
             publisher
                 .send_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
-                    UFrameMetadata::publish(send_topic.clone()),
+                    publish_metadata(send_topic.clone()),
                     |payload| {
                         payload.x = send_expected.x;
                         payload.y = send_expected.y;
@@ -368,7 +373,7 @@ async fn zero_copy_transport_round_trips_stable_container_uninit_payload()
         for _ in 0..50 {
             publisher
                 .send_uninit_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
-                    UFrameMetadata::publish(send_topic.clone()),
+                    publish_metadata(send_topic.clone()),
                     |slot| Ok(slot.write(expected)),
                 )
                 .await?;
@@ -412,7 +417,7 @@ async fn static_allocation_rejects_oversized_payload_without_growth()
     )?;
 
     let spec = UTxLoanSpec::payload(
-        UFrameMetadata::publish(topic).with_encoding(RawBytes::encoding()),
+        publish_metadata(topic).with_encoding(RawBytes::encoding()),
         PayloadLayout::new(64, 1)?,
     )?;
     let result = publisher.loan_tx(spec).await;
@@ -431,7 +436,7 @@ async fn zero_copy_loan_spec_rejects_payload_without_encoding()
     let authority = format!("iox-missing-encoding-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9021)?;
 
-    let result = UTxLoanSpec::payload(UFrameMetadata::publish(topic), PayloadLayout::new(1, 1)?);
+    let result = UTxLoanSpec::payload(publish_metadata(topic), PayloadLayout::new(1, 1)?);
     match result {
         Ok(_) => panic!("payload bytes without encoding must be rejected"),
         Err(error) => assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT),
@@ -446,7 +451,7 @@ async fn zero_copy_uninit_loan_spec_rejects_payload_without_encoding()
     let authority = format!("iox-uninit-missing-encoding-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9022)?;
 
-    let result = UTxLoanSpec::payload(UFrameMetadata::publish(topic), PayloadLayout::new(1, 1)?);
+    let result = UTxLoanSpec::payload(publish_metadata(topic), PayloadLayout::new(1, 1)?);
     match result {
         Ok(_) => panic!("uninit payload bytes without encoding must be rejected"),
         Err(error) => assert_eq!(error.get_code(), UCode::INVALID_ARGUMENT),
@@ -466,7 +471,7 @@ async fn zero_copy_transport_preserves_present_empty_payload()
     let _ = subscriber.receive_zero_copy(&topic, None).await;
 
     let spec = UTxLoanSpec::present_empty_payload(
-        UFrameMetadata::publish(topic.clone()).with_encoding(RawBytes::encoding()),
+        publish_metadata(topic.clone()).with_encoding(RawBytes::encoding()),
     )?;
     let loan = publisher.loan_tx(spec).await?;
     publisher.send_zero_copy(loan).await?;
@@ -499,7 +504,7 @@ async fn zero_copy_transport_preserves_no_payload() -> Result<(), Box<dyn std::e
 
     let _ = subscriber.receive_zero_copy(&topic, None).await;
 
-    let spec = UTxLoanSpec::no_payload(UFrameMetadata::publish(topic.clone()))?;
+    let spec = UTxLoanSpec::no_payload(publish_metadata(topic.clone()))?;
     let loan = publisher.loan_tx(spec).await?;
     publisher.send_zero_copy(loan).await?;
 
@@ -541,7 +546,7 @@ async fn static_allocation_round_trips_stable_container_uninit_payload()
         for _ in 0..50 {
             publisher
                 .send_uninit_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
-                    UFrameMetadata::publish(send_topic.clone()),
+                    publish_metadata(send_topic.clone()),
                     |slot| Ok(slot.write(expected)),
                 )
                 .await?;
@@ -596,7 +601,7 @@ async fn static_allocation_honors_high_alignment_padding_without_growth()
         <TestReading as USerializer<AlignedTestReadingWire>>::ALIGNMENT,
     )?;
     let spec = UTxLoanSpec::payload(
-        UFrameMetadata::publish(topic.clone()).with_encoding(AlignedTestReadingWire::encoding()),
+        publish_metadata(topic.clone()).with_encoding(AlignedTestReadingWire::encoding()),
         layout,
     )?;
     let mut loan = publisher.loan_tx(spec).await?;
@@ -646,9 +651,11 @@ async fn static_allocation_rejects_metadata_heavy_frame_without_growth()
         MessagingPattern::PublishSubscribe,
         Iceoryx2PubSubConfig::static_allocation(1),
     )?;
-    let attributes = UAttributes::new(UUID::build(), topic, None, UMessageType::Publish)
+    let attributes = UAttributes::try_new(UUID::build(), topic, None, UMessageType::Publish)
+        .expect("valid publish attributes")
         .with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00");
-    let metadata = UFrameMetadata::without_payload_encoding(attributes);
+    let metadata = UFrameMetadata::try_without_payload_encoding(attributes)
+        .expect("valid metadata-only publish");
 
     let result = publisher.loan_tx(UTxLoanSpec::no_payload(metadata)?).await;
     let Err(error) = result else {
@@ -678,7 +685,7 @@ async fn zero_copy_transport_rejects_stable_container_wrong_type_name_metadata()
         mem::align_of::<VehiclePose>(),
     );
     let spec = UTxLoanSpec::payload(
-        UFrameMetadata::publish(topic.clone()).with_encoding(encoding),
+        publish_metadata(topic.clone()).with_encoding(encoding),
         PayloadLayout::new(
             mem::size_of::<VehiclePose>(),
             mem::align_of::<VehiclePose>(),
@@ -729,7 +736,7 @@ async fn zero_copy_loan_tx_honors_payload_alignment() -> Result<(), Box<dyn std:
         <TestReading as USerializer<AlignedTestReadingWire>>::ALIGNMENT,
     )?;
     let spec = UTxLoanSpec::payload(
-        UFrameMetadata::publish(topic.clone()).with_encoding(AlignedTestReadingWire::encoding()),
+        publish_metadata(topic.clone()).with_encoding(AlignedTestReadingWire::encoding()),
         layout,
     )?;
     let mut loan = publisher.loan_tx(spec).await?;
@@ -770,16 +777,18 @@ async fn zero_copy_transport_preserves_native_frame_metadata()
     let _ = subscriber.receive_zero_copy(&source, Some(&sink)).await;
 
     let id = UUID::build();
-    let attributes = UAttributes::new(
+    let attributes = UAttributes::try_new(
         id.clone(),
         source.clone(),
         Some(sink.clone()),
         UMessageType::Notification,
     )
+    .expect("valid notification attributes")
     .with_priority(UPriority::CS6)
     .with_ttl(6_000)
     .with_traceparent("00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-00");
-    let header = UFrameMetadata::new(attributes, TestReadingWire::encoding());
+    let header = UFrameMetadata::try_new(attributes, TestReadingWire::encoding())
+        .expect("valid notification metadata");
     let reading = TestReading {
         sensor_id: 12,
         counter: 144,
@@ -845,15 +854,17 @@ async fn zero_copy_receive_filters_mismatched_sink() -> Result<(), Box<dyn std::
 
     let _ = subscriber.receive_zero_copy(&source, Some(&sink_a)).await;
 
-    let header = UFrameMetadata::new(
-        UAttributes::new(
+    let header = UFrameMetadata::try_new(
+        UAttributes::try_new(
             UUID::build(),
             source.clone(),
             Some(sink_b.clone()),
             UMessageType::Notification,
-        ),
+        )
+        .expect("valid notification attributes"),
         TestReadingWire::encoding(),
-    );
+    )
+    .expect("valid notification metadata");
     publisher
         .send_serialized_zero_copy::<TestReadingWire, _>(
             header,
@@ -920,7 +931,7 @@ async fn zero_copy_listener_round_trips_custom_payload_codec()
         for _ in 0..50 {
             publisher
                 .send_serialized_zero_copy::<TestReadingWire, _>(
-                    UFrameMetadata::publish(send_topic.clone()),
+                    publish_metadata(send_topic.clone()),
                     &send_reading,
                 )
                 .await?;
@@ -955,15 +966,17 @@ async fn zero_copy_listener_filters_mismatched_sink() -> Result<(), Box<dyn std:
         .register_zero_copy_listener(&source, Some(&sink_a), listener)
         .await?;
 
-    let header = UFrameMetadata::new(
-        UAttributes::new(
+    let header = UFrameMetadata::try_new(
+        UAttributes::try_new(
             UUID::build(),
             source,
             Some(sink_b),
             UMessageType::Notification,
-        ),
+        )
+        .expect("valid notification attributes"),
         TestReadingWire::encoding(),
-    );
+    )
+    .expect("valid notification metadata");
     publisher
         .send_serialized_zero_copy::<TestReadingWire, _>(
             header,
@@ -1017,7 +1030,7 @@ async fn discovers_matching_iceoryx2_services_by_source_attributes()
 
     transport
         .send_serialized_zero_copy::<TestReadingWire, _>(
-            UFrameMetadata::publish(topic.clone()),
+            publish_metadata(topic.clone()),
             &TestReading {
                 sensor_id: 13,
                 counter: 169,
@@ -1066,7 +1079,7 @@ async fn zero_copy_listener_discovers_late_matching_publisher()
         for _ in 0..50 {
             publisher
                 .send_serialized_zero_copy::<TestReadingWire, _>(
-                    UFrameMetadata::publish(send_topic.clone()),
+                    publish_metadata(send_topic.clone()),
                     &send_reading,
                 )
                 .await?;
@@ -1115,7 +1128,7 @@ async fn zero_copy_listener_fanout_delivers_same_sample_to_two_listeners()
         for _ in 0..50 {
             publisher
                 .send_serialized_zero_copy::<TestReadingWire, _>(
-                    UFrameMetadata::publish(send_topic.clone()),
+                    publish_metadata(send_topic.clone()),
                     &send_reading,
                 )
                 .await?;
@@ -1170,7 +1183,7 @@ async fn zero_copy_publish_fanout_delivers_to_exact_and_source_wildcard_listener
         for _ in 0..50 {
             publisher
                 .send_serialized_zero_copy::<TestReadingWire, _>(
-                    UFrameMetadata::publish(send_topic.clone()),
+                    publish_metadata(send_topic.clone()),
                     &send_reading,
                 )
                 .await?;
@@ -1225,15 +1238,17 @@ async fn zero_copy_targeted_fanout_delivers_to_exact_and_sink_wildcard_listeners
     let send_reading = reading.clone();
     let sender = tokio::spawn(async move {
         for _ in 0..50 {
-            let header = UFrameMetadata::new(
-                UAttributes::new(
+            let header = UFrameMetadata::try_new(
+                UAttributes::try_new(
                     UUID::build(),
                     send_source.clone(),
                     Some(send_sink.clone()),
                     UMessageType::Notification,
-                ),
+                )
+                .expect("valid notification attributes"),
                 TestReadingWire::encoding(),
-            );
+            )
+            .expect("valid notification metadata");
             publisher
                 .send_serialized_zero_copy::<TestReadingWire, _>(header, &send_reading)
                 .await?;

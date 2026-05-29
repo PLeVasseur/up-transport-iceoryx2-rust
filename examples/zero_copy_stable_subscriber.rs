@@ -15,7 +15,7 @@ use std::str::FromStr;
 
 use up_rust::{
     UCode, UUri,
-    zero_copy::{ULoanedContiguousZeroCopyRxFrame, UZeroCopyRxFrame, UZeroCopyTransport},
+    zero_copy::{UFrameView, ULoanedContiguousZeroCopyRxFrame, UZeroCopyTransport},
 };
 use up_transport_iceoryx2_rust::{MessagingPattern, transport::UTransportIceoryx2};
 

@@ -23,7 +23,7 @@ readme = "README.md"
 repository = "https://github.com/eclipse-uprotocol/up-transport-iceoryx2-rust"
 
 [dependencies]
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "b45bf7f28a3a943ed4c9153571f5d6892458d937" }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "81f4fa71285fdfcda723a50b6b2d0975858a6429" }
 async-trait = "0.1"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 iceoryx2 = "0.9.0"
@@ -32,7 +32,7 @@ hostname = "0.4.1"
 
 [dev-dependencies]
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "b45bf7f28a3a943ed4c9153571f5d6892458d937", features = ["protobuf-wire", "test-util"] }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "81f4fa71285fdfcda723a50b6b2d0975858a6429", features = ["protobuf-wire", "test-util"] }
 
 [package.metadata.docs.rs]
 all-features = true

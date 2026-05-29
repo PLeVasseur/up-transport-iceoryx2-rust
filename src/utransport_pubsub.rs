@@ -29,13 +29,12 @@ use std::mem::MaybeUninit;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 use up_rust::{
-    UCode, UFrameMetadata, UStatus, UTxLoanSpec, UUri, UZeroCopyUninitTransport,
-    transport::verify_filter_criteria,
-    validate_frame_metadata_for_payload,
+    UCode, UFrameMetadata, UStatus, UUri,
+    transport::{ValidatedTxLoanSpec, validate_frame_view_for_transport},
     zero_copy::{
         LoanedPayload, LoanedPayloadUninitMut, PayloadLoanProvenance, UContiguousZeroCopyRxFrame,
-        ULoanedContiguousZeroCopyRxFrame, UTxBuffer, UUninitTxBuffer, UZeroCopyListener,
-        UZeroCopyRxFrame, UZeroCopyTransport,
+        UFrameView, ULoanedContiguousZeroCopyRxFrame, UTxBuffer, UUninitTxBuffer,
+        UZeroCopyListener, UZeroCopyRxLease, UZeroCopyTransportImpl, UZeroCopyUninitTransportImpl,
     },
 };
 
@@ -598,10 +597,10 @@ impl UUninitTxBuffer for Iceoryx2UninitTxLoan {
 ///
 /// Dropping the lease releases the underlying iceoryx2 sample. The payload is
 /// guaranteed contiguous in the current mapping, so this type implements both
-/// [`UZeroCopyRxFrame`] and [`UContiguousZeroCopyRxFrame`]. Borrowed decoded
+/// [`UZeroCopyRxLease`] and [`UContiguousZeroCopyRxFrame`]. Borrowed decoded
 /// values must not outlive the lease.
 ///
-/// [`UZeroCopyRxFrame`]: up_rust::zero_copy::UZeroCopyRxFrame
+/// [`UZeroCopyRxLease`]: up_rust::zero_copy::UZeroCopyRxLease
 /// [`UContiguousZeroCopyRxFrame`]: up_rust::zero_copy::UContiguousZeroCopyRxFrame
 pub struct Iceoryx2RxLease {
     metadata: UFrameMetadata,
@@ -610,7 +609,7 @@ pub struct Iceoryx2RxLease {
     payload_len: usize,
 }
 
-impl UZeroCopyRxFrame for Iceoryx2RxLease {
+impl UFrameView for Iceoryx2RxLease {
     type PayloadReader<'a>
         = Cursor<&'a [u8]>
     where
@@ -645,6 +644,8 @@ impl UZeroCopyRxFrame for Iceoryx2RxLease {
     }
 }
 
+impl UZeroCopyRxLease for Iceoryx2RxLease {}
+
 impl UContiguousZeroCopyRxFrame for Iceoryx2RxLease {
     fn contiguous_payload(&self) -> &[u8] {
         self.try_contiguous_payload()
@@ -671,16 +672,15 @@ impl ULoanedContiguousZeroCopyRxFrame for Iceoryx2RxLease {
 }
 
 #[async_trait]
-impl UZeroCopyTransport for Iceoryx2PubSub {
+impl UZeroCopyTransportImpl for Iceoryx2PubSub {
     type Tx = Iceoryx2TxLoan;
     type Rx = Iceoryx2RxLease;
 
-    async fn loan_tx(&self, spec: UTxLoanSpec) -> Result<Self::Tx, UStatus> {
+    async fn loan_validated_tx(&self, spec: ValidatedTxLoanSpec) -> Result<Self::Tx, UStatus> {
         let header = spec.metadata().clone();
         let payload_len = spec.payload_len();
         let alignment = spec.payload_alignment();
         validate_alignment(alignment)?;
-        validate_frame_metadata_for_payload(&header, header.encoding().is_some())?;
         let source = header.attributes().source();
         let service_name = compute_service_name(
             source,
@@ -727,19 +727,18 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
         })
     }
 
-    async fn send_zero_copy(&self, buffer: Self::Tx) -> Result<(), UStatus> {
+    async fn send_validated_zero_copy(&self, buffer: Self::Tx) -> Result<(), UStatus> {
         buffer.sample.send().map_err(|e| {
             UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to send: {e}"))
         })?;
         Ok(())
     }
 
-    async fn receive_zero_copy(
+    async fn receive_validated_zero_copy(
         &self,
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
     ) -> Result<Self::Rx, UStatus> {
-        verify_filter_criteria(source_filter, sink_filter)?;
         let service_name = compute_service_name(
             source_filter,
             sink_filter,
@@ -768,13 +767,12 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
         }
     }
 
-    async fn register_zero_copy_listener(
+    async fn register_validated_zero_copy_listener(
         &self,
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UZeroCopyListener<Self::Rx>>,
     ) -> Result<(), UStatus> {
-        verify_filter_criteria(source_filter, sink_filter)?;
         let mut listeners = self.zero_copy_listeners.write().await;
         if listeners.iter().any(|registration| {
             registration.has_same_identity(source_filter, sink_filter, &listener)
@@ -801,13 +799,12 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
         Ok(())
     }
 
-    async fn unregister_zero_copy_listener(
+    async fn unregister_validated_zero_copy_listener(
         &self,
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UZeroCopyListener<Self::Rx>>,
     ) -> Result<(), UStatus> {
-        verify_filter_criteria(source_filter, sink_filter)?;
         let mut listeners = self.zero_copy_listeners.write().await;
         let Some(index) = listeners.iter().position(|registration| {
             registration.has_same_identity(source_filter, sink_filter, &listener)
@@ -823,15 +820,17 @@ impl UZeroCopyTransport for Iceoryx2PubSub {
 }
 
 #[async_trait]
-impl UZeroCopyUninitTransport for Iceoryx2PubSub {
+impl UZeroCopyUninitTransportImpl for Iceoryx2PubSub {
     type UninitTx = Iceoryx2UninitTxLoan;
 
-    async fn loan_uninit_tx(&self, spec: UTxLoanSpec) -> Result<Self::UninitTx, UStatus> {
+    async fn loan_validated_uninit_tx(
+        &self,
+        spec: ValidatedTxLoanSpec,
+    ) -> Result<Self::UninitTx, UStatus> {
         let header = spec.metadata().clone();
         let payload_len = spec.payload_len();
         let alignment = spec.payload_alignment();
         validate_alignment(alignment)?;
-        validate_frame_metadata_for_payload(&header, header.encoding().is_some())?;
         let source = header.attributes().source();
         let service_name = compute_service_name(
             source,
@@ -882,14 +881,15 @@ fn lease_from_sample(sample: IpcSample) -> Result<Iceoryx2RxLease, UStatus> {
         .user_header()
         .payload_layout(sample.payload().len())?;
     let metadata = sample.user_header().frame_metadata(sample.payload())?;
-    validate_frame_metadata_for_payload(&metadata, metadata.encoding().is_some())?;
     validate_payload_alignment(sample.user_header(), sample.payload(), payload_offset)?;
-    Ok(Iceoryx2RxLease {
+    let lease = Iceoryx2RxLease {
         metadata,
         sample,
         payload_offset,
         payload_len,
-    })
+    };
+    validate_frame_view_for_transport(&lease)?;
+    Ok(lease)
 }
 
 fn validate_alignment(alignment: usize) -> Result<(), UStatus> {
