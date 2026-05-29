@@ -14,7 +14,10 @@
 use std::{mem, sync::Arc};
 
 use protobuf::well_known_types::wrappers::StringValue;
-use tokio::{sync::mpsc, time::Duration};
+use tokio::{
+    sync::{Mutex, MutexGuard, mpsc},
+    time::Duration,
+};
 use up_rust::{
     PayloadEncoding, ProtobufPayload, UAttributes, UCode, UFrameMetadata, UMessageType, UPriority,
     UTxLoanSpec, UUID, UUri, UZeroCopyUninitTransportExt,
@@ -161,6 +164,12 @@ impl<'a> UDeserializer<'a, TestReadingWire> for TestReading {
 
 struct LeaseSender(mpsc::UnboundedSender<(Option<PayloadEncoding>, TestReading)>);
 
+static ICEORYX2_TEST_MUTEX: Mutex<()> = Mutex::const_new(());
+
+async fn iceoryx2_test_guard() -> MutexGuard<'static, ()> {
+    ICEORYX2_TEST_MUTEX.lock().await
+}
+
 #[async_trait::async_trait]
 impl UZeroCopyListener<Iceoryx2RxLease> for LeaseSender {
     async fn on_receive_zero_copy(&self, frame: Iceoryx2RxLease) {
@@ -177,6 +186,7 @@ impl UZeroCopyListener<Iceoryx2RxLease> for LeaseSender {
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_transport_round_trips_custom_payload_codec()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9002)?;
     let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
@@ -229,6 +239,7 @@ async fn zero_copy_transport_round_trips_custom_payload_codec()
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_transport_round_trips_protobuf_payload_codec()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-pb-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9006)?;
     let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
@@ -281,6 +292,7 @@ async fn zero_copy_transport_round_trips_protobuf_payload_codec()
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_transport_round_trips_stable_container_payload()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-stable-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9007)?;
     let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
@@ -342,6 +354,7 @@ async fn zero_copy_transport_round_trips_stable_container_payload()
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_transport_round_trips_stable_container_uninit_payload()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-stable-uninit-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9009)?;
     let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
@@ -390,6 +403,7 @@ async fn zero_copy_transport_round_trips_stable_container_uninit_payload()
 #[tokio::test(flavor = "multi_thread")]
 async fn static_allocation_rejects_oversized_payload_without_growth()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-static-cap-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9011)?;
     let publisher = UTransportIceoryx2::build_with_config(
@@ -413,6 +427,7 @@ async fn static_allocation_rejects_oversized_payload_without_growth()
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_loan_spec_rejects_payload_without_encoding()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-missing-encoding-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9021)?;
 
@@ -427,6 +442,7 @@ async fn zero_copy_loan_spec_rejects_payload_without_encoding()
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_uninit_loan_spec_rejects_payload_without_encoding()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-uninit-missing-encoding-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9022)?;
 
@@ -441,6 +457,7 @@ async fn zero_copy_uninit_loan_spec_rejects_payload_without_encoding()
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_transport_preserves_present_empty_payload()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-present-empty-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9023)?;
     let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
@@ -474,6 +491,7 @@ async fn zero_copy_transport_preserves_present_empty_payload()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_transport_preserves_no_payload() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-no-payload-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9024)?;
     let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
@@ -506,6 +524,7 @@ async fn zero_copy_transport_preserves_no_payload() -> Result<(), Box<dyn std::e
 #[tokio::test(flavor = "multi_thread")]
 async fn static_allocation_round_trips_stable_container_uninit_payload()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-static-stable-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9018)?;
     let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
@@ -557,6 +576,7 @@ async fn static_allocation_round_trips_stable_container_uninit_payload()
 #[tokio::test(flavor = "multi_thread")]
 async fn static_allocation_honors_high_alignment_padding_without_growth()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-static-align-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9019)?;
     let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
@@ -619,6 +639,7 @@ async fn static_allocation_honors_high_alignment_padding_without_growth()
 #[tokio::test(flavor = "multi_thread")]
 async fn static_allocation_rejects_metadata_heavy_frame_without_growth()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-static-metadata-cap-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9020)?;
     let publisher = UTransportIceoryx2::build_with_config(
@@ -641,6 +662,7 @@ async fn static_allocation_rejects_metadata_heavy_frame_without_growth()
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_transport_rejects_stable_container_wrong_type_name_metadata()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-stable-negative-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9008)?;
     let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
@@ -690,6 +712,7 @@ async fn zero_copy_transport_rejects_stable_container_wrong_type_name_metadata()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_loan_tx_honors_payload_alignment() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-align-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9010)?;
     let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
@@ -737,6 +760,7 @@ async fn zero_copy_loan_tx_honors_payload_alignment() -> Result<(), Box<dyn std:
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_transport_preserves_native_frame_metadata()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-metadata-test-{}", std::process::id());
     let source = UUri::try_from_parts(&authority, 0x4210, 1, 0x9008)?;
     let sink = UUri::try_from_parts(&authority, 0x4210, 1, 0)?;
@@ -811,6 +835,7 @@ async fn zero_copy_transport_preserves_native_frame_metadata()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_receive_filters_mismatched_sink() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-sink-filter-test-{}", std::process::id());
     let source = UUri::try_from_parts(&authority, 0x4210, 1, 0x9011)?;
     let sink_a = UUri::try_from_parts(&authority, 0x4211, 1, 0)?;
@@ -873,6 +898,7 @@ async fn zero_copy_receive_filters_mismatched_sink() -> Result<(), Box<dyn std::
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_listener_round_trips_custom_payload_codec()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-listener-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9003)?;
     let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
@@ -915,6 +941,7 @@ async fn zero_copy_listener_round_trips_custom_payload_codec()
 
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_listener_filters_mismatched_sink() -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-listener-sink-filter-test-{}", std::process::id());
     let source = UUri::try_from_parts(&authority, 0x4210, 1, 0x9012)?;
     let sink_a = UUri::try_from_parts(&authority, 0x4211, 1, 0)?;
@@ -959,6 +986,7 @@ async fn zero_copy_listener_filters_mismatched_sink() -> Result<(), Box<dyn std:
 #[tokio::test(flavor = "multi_thread")]
 async fn exposes_iceoryx2_service_names_for_streamer_discovery()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-discovery-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9004)?;
     let transport = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
@@ -979,6 +1007,7 @@ async fn exposes_iceoryx2_service_names_for_streamer_discovery()
 #[tokio::test(flavor = "multi_thread")]
 async fn discovers_matching_iceoryx2_services_by_source_attributes()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-attr-discovery-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x1234_4210, 1, 0x9013)?;
     let wildcard_instance_filter = UUri::try_from_parts(&authority, 0xFFFF_4210, 1, 0x9013)?;
@@ -1014,6 +1043,7 @@ async fn discovers_matching_iceoryx2_services_by_source_attributes()
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_listener_discovers_late_matching_publisher()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-late-discovery-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x2345_4210, 1, 0x9014)?;
     let wildcard_instance_filter = UUri::try_from_parts(&authority, 0xFFFF_4210, 1, 0x9014)?;
@@ -1058,6 +1088,7 @@ async fn zero_copy_listener_discovers_late_matching_publisher()
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_listener_fanout_delivers_same_sample_to_two_listeners()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-fanout-test-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9015)?;
     let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
@@ -1109,6 +1140,7 @@ async fn zero_copy_listener_fanout_delivers_same_sample_to_two_listeners()
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_publish_fanout_delivers_to_exact_and_source_wildcard_listeners()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-source-wildcard-fanout-{}", std::process::id());
     let topic = UUri::try_from_parts(&authority, 0x3456_4210, 1, 0x9016)?;
     let source_wildcard = UUri::try_from_parts(&authority, 0xFFFF_4210, 1, 0x9016)?;
@@ -1163,6 +1195,7 @@ async fn zero_copy_publish_fanout_delivers_to_exact_and_source_wildcard_listener
 #[tokio::test(flavor = "multi_thread")]
 async fn zero_copy_targeted_fanout_delivers_to_exact_and_sink_wildcard_listeners()
 -> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
     let authority = format!("iox-sink-wildcard-fanout-{}", std::process::id());
     let source = UUri::try_from_parts(&authority, 0x4210, 1, 0x9017)?;
     let sink = UUri::try_from_parts(&authority, 0x4220, 1, 0)?;
