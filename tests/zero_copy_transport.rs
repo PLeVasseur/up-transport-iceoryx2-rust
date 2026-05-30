@@ -69,8 +69,8 @@ fn bytes_of_pose(pose: &VehiclePose) -> &[u8] {
 }
 
 use up_transport_iceoryx2_rust::{
-    Iceoryx2PubSub, Iceoryx2PubSubConfig, Iceoryx2RxLease, MessagingPattern,
-    transport::UTransportIceoryx2,
+    Iceoryx2PubSub, Iceoryx2PubSubConfig, Iceoryx2PullMismatchQueueFullPolicy, Iceoryx2RxLease,
+    MessagingPattern, transport::UTransportIceoryx2,
 };
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -173,6 +173,34 @@ async fn iceoryx2_test_guard() -> MutexGuard<'static, ()> {
 
 fn publish_metadata(topic: UUri) -> UFrameMetadata {
     UFrameMetadata::try_publish(topic).expect("valid publish metadata")
+}
+
+async fn send_notification_reading(
+    publisher: &Iceoryx2PubSub,
+    source: &UUri,
+    sink: &UUri,
+    counter: u32,
+) -> Result<(), up_rust::UStatus> {
+    let header = UFrameMetadata::try_new(
+        UAttributes::try_new(
+            UUID::build(),
+            source.clone(),
+            Some(sink.clone()),
+            UMessageType::Notification,
+        )
+        .expect("valid notification attributes"),
+        TestReadingWire::encoding(),
+    )
+    .expect("valid notification metadata");
+    publisher
+        .send_serialized_zero_copy::<TestReadingWire, _>(
+            header,
+            &TestReading {
+                sensor_id: 1,
+                counter,
+            },
+        )
+        .await
 }
 
 #[async_trait::async_trait]
@@ -854,26 +882,7 @@ async fn zero_copy_receive_filters_mismatched_sink() -> Result<(), Box<dyn std::
 
     let _ = subscriber.receive_zero_copy(&source, Some(&sink_a)).await;
 
-    let header = UFrameMetadata::try_new(
-        UAttributes::try_new(
-            UUID::build(),
-            source.clone(),
-            Some(sink_b.clone()),
-            UMessageType::Notification,
-        )
-        .expect("valid notification attributes"),
-        TestReadingWire::encoding(),
-    )
-    .expect("valid notification metadata");
-    publisher
-        .send_serialized_zero_copy::<TestReadingWire, _>(
-            header,
-            &TestReading {
-                sensor_id: 1,
-                counter: 2,
-            },
-        )
-        .await?;
+    send_notification_reading(&publisher, &source, &sink_b, 2).await?;
 
     let mut sink_a_rejected = false;
     for _ in 0..100 {
@@ -890,10 +899,28 @@ async fn zero_copy_receive_filters_mismatched_sink() -> Result<(), Box<dyn std::
         return Err("sink A receive delivered a sink B sample".into());
     }
 
+    let diagnostics = subscriber.pull_mismatch_queue_diagnostics().await;
+    assert_eq!(diagnostics.current_depth, 1);
+    assert_eq!(diagnostics.dropped_mismatches, 0);
+    assert_eq!(diagnostics.rejected_mismatches, 0);
+    assert!(
+        diagnostics
+            .last_mismatch_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("queued mismatched pull sample"))
+    );
+
     for _ in 0..100 {
         match subscriber.receive_zero_copy(&source, Some(&sink_b)).await {
             Ok(rx) => {
                 assert_eq!(rx.metadata().attributes().sink(), Some(&sink_b));
+                assert_eq!(
+                    subscriber
+                        .pull_mismatch_queue_diagnostics()
+                        .await
+                        .current_depth,
+                    0
+                );
                 return Ok(());
             }
             Err(status) if status.get_code() == UCode::NOT_FOUND => {
@@ -904,6 +931,135 @@ async fn zero_copy_receive_filters_mismatched_sink() -> Result<(), Box<dyn std::
     }
 
     Err("sink B sample was not preserved after mismatched sink A receive".into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_pull_mismatch_queue_drops_oldest_when_full()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
+    let authority = format!("iox-sink-filter-capacity-test-{}", std::process::id());
+    let source = UUri::try_from_parts(&authority, 0x4210, 1, 0x9012)?;
+    let sink_a = UUri::try_from_parts(&authority, 0x4211, 1, 0)?;
+    let sink_b = UUri::try_from_parts(&authority, 0x4212, 1, 0)?;
+    let subscriber = UTransportIceoryx2::build_with_config(
+        MessagingPattern::PublishSubscribe,
+        Iceoryx2PubSubConfig::default().with_pull_mismatch_queue_capacity(1),
+    )?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+
+    let _ = subscriber.receive_zero_copy(&source, Some(&sink_a)).await;
+    send_notification_reading(&publisher, &source, &sink_b, 1).await?;
+    send_notification_reading(&publisher, &source, &sink_b, 2).await?;
+
+    let mut sink_a_rejected = false;
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&source, Some(&sink_a)).await {
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                sink_a_rejected = true;
+                break;
+            }
+            Err(status) => return Err(status.into()),
+            Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+    if !sink_a_rejected {
+        return Err("sink A receive did not drain mismatched sink B samples".into());
+    }
+
+    let diagnostics = subscriber.pull_mismatch_queue_diagnostics().await;
+    assert_eq!(diagnostics.current_depth, 1);
+    assert_eq!(diagnostics.dropped_mismatches, 1);
+    assert_eq!(diagnostics.rejected_mismatches, 0);
+    assert!(
+        diagnostics
+            .last_mismatch_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("dropped oldest mismatched pull sample"))
+    );
+
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&source, Some(&sink_b)).await {
+            Ok(rx) => {
+                let reading = rx.deserialize_borrowed::<TestReadingWire, TestReading>()?;
+                assert_eq!(reading.counter, 2);
+                return Ok(());
+            }
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+
+    Err("sink B receive did not observe the retained newest mismatch".into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_pull_mismatch_queue_can_reject_newest_when_full()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
+    let authority = format!("iox-sink-filter-reject-test-{}", std::process::id());
+    let source = UUri::try_from_parts(&authority, 0x4210, 1, 0x9014)?;
+    let sink_a = UUri::try_from_parts(&authority, 0x4211, 1, 0)?;
+    let sink_b = UUri::try_from_parts(&authority, 0x4212, 1, 0)?;
+    let subscriber = UTransportIceoryx2::build_with_config(
+        MessagingPattern::PublishSubscribe,
+        Iceoryx2PubSubConfig::default()
+            .with_pull_mismatch_queue_capacity(1)
+            .with_pull_mismatch_queue_full_policy(
+                Iceoryx2PullMismatchQueueFullPolicy::RejectNewestAndReport,
+            ),
+    )?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+
+    let _ = subscriber.receive_zero_copy(&source, Some(&sink_a)).await;
+    send_notification_reading(&publisher, &source, &sink_b, 1).await?;
+    send_notification_reading(&publisher, &source, &sink_b, 2).await?;
+
+    let mut queue_full_observed = false;
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&source, Some(&sink_a)).await {
+            Err(status) if status.get_code() == UCode::RESOURCE_EXHAUSTED => {
+                queue_full_observed = true;
+                break;
+            }
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(status) => return Err(status.into()),
+            Ok(_) => tokio::time::sleep(Duration::from_millis(100)).await,
+        }
+    }
+    if !queue_full_observed {
+        return Err("reject-newest policy did not report a full mismatch queue".into());
+    }
+
+    let diagnostics = subscriber.pull_mismatch_queue_diagnostics().await;
+    assert_eq!(diagnostics.current_depth, 1);
+    assert_eq!(diagnostics.dropped_mismatches, 0);
+    assert_eq!(diagnostics.rejected_mismatches, 1);
+    assert!(
+        diagnostics
+            .last_mismatch_reason
+            .as_deref()
+            .is_some_and(|reason| reason.contains("rejected newest mismatched pull sample"))
+    );
+
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&source, Some(&sink_b)).await {
+            Ok(rx) => {
+                let reading = rx.deserialize_borrowed::<TestReadingWire, TestReading>()?;
+                assert_eq!(reading.counter, 1);
+                return Ok(());
+            }
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+
+    Err("sink B receive did not observe the retained first mismatch".into())
 }
 
 #[tokio::test(flavor = "multi_thread")]

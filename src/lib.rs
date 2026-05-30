@@ -58,7 +58,8 @@ pub(crate) mod workers;
 
 pub use iceoryx2::prelude::MessagingPattern;
 pub use utransport_pubsub::{
-    Iceoryx2PubSub, Iceoryx2PubSubConfig, Iceoryx2RxLease, Iceoryx2TxLoan, Iceoryx2UninitTxLoan,
+    Iceoryx2PubSub, Iceoryx2PubSubConfig, Iceoryx2PullMismatchQueueFullPolicy, Iceoryx2RxLease,
+    Iceoryx2TxLoan, Iceoryx2UninitTxLoan, PullMismatchQueueDiagnostics,
 };
 
 /// Marker trait for user-header types that are safe for iceoryx2 zero-copy use.

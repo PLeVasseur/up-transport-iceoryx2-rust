@@ -113,8 +113,31 @@ pub struct Iceoryx2PubSub {
     /// multiple matching uProtocol listeners do not consume a single shared
     /// sample queue.
     pub subscribers: SubscriberSet<ipc_threadsafe::Service>,
-    pull_receive_queues: Mutex<HashMap<ServiceName, VecDeque<Iceoryx2RxLease>>>,
+    pull_receive_queue_state: Mutex<PullReceiveQueueState>,
     zero_copy_listeners: ZeroCopyListenerMap,
+}
+
+#[derive(Default)]
+struct PullReceiveQueueState {
+    queues: HashMap<ServiceName, VecDeque<Iceoryx2RxLease>>,
+    dropped_mismatches: u64,
+    rejected_mismatches: u64,
+    last_mismatch_reason: Option<String>,
+}
+
+impl PullReceiveQueueState {
+    fn current_depth(&self) -> usize {
+        self.queues.values().map(VecDeque::len).sum()
+    }
+
+    fn diagnostics(&self) -> PullMismatchQueueDiagnostics {
+        PullMismatchQueueDiagnostics {
+            current_depth: self.current_depth(),
+            dropped_mismatches: self.dropped_mismatches,
+            rejected_mismatches: self.rejected_mismatches,
+            last_mismatch_reason: self.last_mismatch_reason.clone(),
+        }
+    }
 }
 
 impl std::fmt::Debug for Iceoryx2PubSub {
@@ -140,7 +163,7 @@ impl Iceoryx2PubSub {
             config,
             publishers: RwLock::new(HashMap::new()),
             subscribers: RwLock::new(HashMap::new()),
-            pull_receive_queues: Mutex::new(HashMap::new()),
+            pull_receive_queue_state: Mutex::new(PullReceiveQueueState::default()),
             zero_copy_listeners: RwLock::new(Vec::new()),
         });
         Iceoryx2WorkerDispatcher::start_listener_worker(transport.clone());
@@ -355,6 +378,11 @@ impl Iceoryx2PubSub {
         Ok(())
     }
 
+    /// Returns diagnostics for the bounded pull mismatch queue.
+    pub async fn pull_mismatch_queue_diagnostics(&self) -> PullMismatchQueueDiagnostics {
+        self.pull_receive_queue_state.lock().await.diagnostics()
+    }
+
     async fn refresh_listener_subscriptions(&self) -> Result<(), UStatus> {
         let mut services = Vec::new();
         ipc_threadsafe::Service::list(self.node.config(), |service| {
@@ -390,26 +418,95 @@ impl Iceoryx2PubSub {
         service_name: &ServiceName,
         sink_filter: Option<&UUri>,
     ) -> Option<Iceoryx2RxLease> {
-        let mut queues = self.pull_receive_queues.lock().await;
-        let queue = queues.get_mut(service_name)?;
+        let mut state = self.pull_receive_queue_state.lock().await;
+        let queue = state.queues.get_mut(service_name)?;
         let index = queue
             .iter()
             .position(|lease| sink_matches(lease.metadata().attributes().sink(), sink_filter))?;
         let lease = queue.remove(index);
         if queue.is_empty() {
-            queues.remove(service_name);
+            state.queues.remove(service_name);
         }
         lease
     }
 
-    async fn queue_pull_sample(&self, service_name: ServiceName, lease: Iceoryx2RxLease) {
-        self.pull_receive_queues
-            .lock()
-            .await
-            .entry(service_name)
-            .or_default()
-            .push_back(lease);
+    async fn queue_pull_sample(
+        &self,
+        service_name: ServiceName,
+        lease: Iceoryx2RxLease,
+    ) -> Result<(), UStatus> {
+        let capacity = self.config.pull_mismatch_queue_capacity;
+        let service_name_text = service_name.as_str().to_owned();
+        let mut state = self.pull_receive_queue_state.lock().await;
+        if capacity == 0 {
+            state.dropped_mismatches = state.dropped_mismatches.saturating_add(1);
+            state.last_mismatch_reason = Some(format!(
+                "dropped mismatched pull sample for {service_name_text}; capacity is 0"
+            ));
+            return Ok(());
+        }
+
+        let is_full = state
+            .queues
+            .get(&service_name)
+            .is_some_and(|queue| queue.len() >= capacity);
+        if is_full
+            && self.config.pull_mismatch_queue_full_policy
+                == Iceoryx2PullMismatchQueueFullPolicy::RejectNewestAndReport
+        {
+            state.rejected_mismatches = state.rejected_mismatches.saturating_add(1);
+            state.last_mismatch_reason = Some(format!(
+                "rejected newest mismatched pull sample for {service_name_text}; capacity is {capacity}"
+            ));
+            return Err(UStatus::fail_with_code(
+                UCode::RESOURCE_EXHAUSTED,
+                format!("pull mismatch queue full for {service_name_text}; capacity is {capacity}"),
+            ));
+        }
+
+        let depth_after = {
+            let queue = state.queues.entry(service_name).or_default();
+            if is_full {
+                queue.pop_front();
+            }
+            queue.push_back(lease);
+            queue.len()
+        };
+
+        if is_full {
+            state.dropped_mismatches = state.dropped_mismatches.saturating_add(1);
+            state.last_mismatch_reason = Some(format!(
+                "dropped oldest mismatched pull sample for {service_name_text}; capacity is {capacity}"
+            ));
+        } else {
+            state.last_mismatch_reason = Some(format!(
+                "queued mismatched pull sample for {service_name_text}; depth is {depth_after}"
+            ));
+        }
+        Ok(())
     }
+}
+
+/// Full-queue behavior for pull receive samples that do not match the requested sink.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Iceoryx2PullMismatchQueueFullPolicy {
+    /// Preserve bounded pull receive behavior by dropping the oldest retained mismatch.
+    DropOldestAndReport,
+    /// Reject the newest mismatch and return [`UCode::RESOURCE_EXHAUSTED`] to the receive call.
+    RejectNewestAndReport,
+}
+
+/// Snapshot of bounded pull mismatch queue state.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PullMismatchQueueDiagnostics {
+    /// Total retained mismatch samples across all service queues.
+    pub current_depth: usize,
+    /// Number of mismatch samples dropped because a queue was full or capacity was zero.
+    pub dropped_mismatches: u64,
+    /// Number of mismatch samples rejected by [`Iceoryx2PullMismatchQueueFullPolicy::RejectNewestAndReport`].
+    pub rejected_mismatches: u64,
+    /// Human-readable reason recorded for the last mismatched pull sample.
+    pub last_mismatch_reason: Option<String>,
 }
 
 /// Publisher allocation controls for [`Iceoryx2PubSub`].
@@ -419,6 +516,10 @@ pub struct Iceoryx2PubSubConfig {
     pub publisher_initial_max_slice_len: usize,
     /// iceoryx2 allocation strategy used when a publisher loan exceeds the initial length.
     pub publisher_allocation_strategy: AllocationStrategy,
+    /// Maximum retained mismatched pull samples per iceoryx2 service.
+    pub pull_mismatch_queue_capacity: usize,
+    /// Policy applied when a per-service mismatch queue is full.
+    pub pull_mismatch_queue_full_policy: Iceoryx2PullMismatchQueueFullPolicy,
 }
 
 impl Default for Iceoryx2PubSubConfig {
@@ -426,6 +527,9 @@ impl Default for Iceoryx2PubSubConfig {
         Self {
             publisher_initial_max_slice_len: 1,
             publisher_allocation_strategy: AllocationStrategy::PowerOfTwo,
+            pull_mismatch_queue_capacity: 64,
+            pull_mismatch_queue_full_policy:
+                Iceoryx2PullMismatchQueueFullPolicy::DropOldestAndReport,
         }
     }
 }
@@ -437,6 +541,7 @@ impl Iceoryx2PubSubConfig {
         Self {
             publisher_initial_max_slice_len: max_slice_len,
             publisher_allocation_strategy: AllocationStrategy::Static,
+            ..Self::default()
         }
     }
 
@@ -451,6 +556,23 @@ impl Iceoryx2PubSubConfig {
     #[must_use]
     pub fn with_publisher_allocation_strategy(mut self, value: AllocationStrategy) -> Self {
         self.publisher_allocation_strategy = value;
+        self
+    }
+
+    /// Sets the maximum retained mismatched pull samples per iceoryx2 service.
+    #[must_use]
+    pub fn with_pull_mismatch_queue_capacity(mut self, value: usize) -> Self {
+        self.pull_mismatch_queue_capacity = value;
+        self
+    }
+
+    /// Sets the full-queue policy for retained mismatched pull samples.
+    #[must_use]
+    pub fn with_pull_mismatch_queue_full_policy(
+        mut self,
+        value: Iceoryx2PullMismatchQueueFullPolicy,
+    ) -> Self {
+        self.pull_mismatch_queue_full_policy = value;
         self
     }
 }
@@ -760,7 +882,7 @@ impl UZeroCopyTransportImpl for Iceoryx2PubSub {
                 .ok_or_else(|| UStatus::fail_with_code(UCode::NOT_FOUND, "no sample available"))?;
             let lease = lease_from_sample(sample)?;
             if !sink_matches(lease.metadata().attributes().sink(), sink_filter) {
-                self.queue_pull_sample(service_name, lease).await;
+                self.queue_pull_sample(service_name, lease).await?;
                 continue;
             }
             return Ok(lease);

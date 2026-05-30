@@ -85,10 +85,15 @@ payload: no payload has no `PayloadEncoding`, while a present empty payload keep
 its encoding and reports payload presence with length zero. Payload bytes with no
 encoding are rejected before send.
 
-Filtered pull receive preserves nonmatching samples in an internal per-service
-queue so another matching receive call can still observe them. The queue is not
-currently bounded by a public resource policy; deployments that rely heavily on
-mismatched pull filters should treat this as a resource consideration.
+Filtered pull receive preserves nonmatching samples in a bounded internal
+per-service queue so another matching receive call can still observe them.
+`Iceoryx2PubSubConfig::pull_mismatch_queue_capacity` defaults to 64 retained
+mismatches per service. When a per-service queue is full, the default
+`Iceoryx2PullMismatchQueueFullPolicy::DropOldestAndReport` policy keeps receive
+calls non-erroring and drops the oldest retained mismatch; applications that
+prefer an explicit receive error can select `RejectNewestAndReport`. Use
+`Iceoryx2PubSub::pull_mismatch_queue_diagnostics()` to inspect current depth,
+drop/rejection counters, and the last mismatch reason.
 
 ## Verification
 
