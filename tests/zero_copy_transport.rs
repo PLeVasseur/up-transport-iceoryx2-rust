@@ -51,6 +51,42 @@ struct VehiclePose {
     y: u32,
 }
 
+#[repr(C)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    up_rust::StablePayload,
+    up_rust::ByteBackedStablePayload,
+    up_rust::StablePayloadInit,
+)]
+#[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorHeader")]
+struct NoZeroSensorHeader {
+    case_id: u32,
+    sequence: u32,
+    logical_payload_len: u32,
+}
+
+#[repr(C)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    up_rust::StablePayload,
+    up_rust::ByteBackedStablePayload,
+    up_rust::StablePayloadInit,
+)]
+#[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorFrame")]
+struct NoZeroSensorFrame {
+    header: NoZeroSensorHeader,
+    checksum: u32,
+    payload: [u8; 4096],
+}
+
 fn bytes_of_pose(pose: &VehiclePose) -> &[u8] {
     // SAFETY:
     // - `pose` is a valid shared reference to one `VehiclePose` and is therefore
@@ -431,6 +467,76 @@ async fn zero_copy_transport_round_trips_stable_container_uninit_payload()
 
     sender.abort();
     Err("timed out waiting for a stable-container uninit zero-copy sample".into())
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn zero_copy_transport_round_trips_no_zero_stable_payload()
+-> Result<(), Box<dyn std::error::Error>> {
+    let _guard = iceoryx2_test_guard().await;
+    let authority = format!("iox-no-zero-stable-test-{}", std::process::id());
+    let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9025)?;
+    let subscriber = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+    let publisher = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
+
+    let _ = subscriber.receive_zero_copy(&topic, None).await;
+
+    let send_topic = topic.clone();
+    let sender = tokio::spawn(async move {
+        for _ in 0..50 {
+            publisher
+                .send_uninit_stable_payload_as::<NoZeroSensorFrame>(
+                    publish_metadata(send_topic.clone()),
+                    |frame| {
+                        frame
+                            .header(|header| {
+                                header
+                                    .case_id(1)
+                                    .sequence(2)
+                                    .logical_payload_len(4096)
+                                    .finish()
+                            })?
+                            .checksum(0x5eed_cafe)
+                            .payload_fill(0x5a)
+                            .finish()
+                    },
+                )
+                .await?;
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+        Ok::<(), up_rust::UStatus>(())
+    });
+
+    for _ in 0..100 {
+        match subscriber.receive_zero_copy(&topic, None).await {
+            Ok(rx) => {
+                assert_eq!(
+                    rx.payload_loan_provenance()?,
+                    PayloadLoanProvenance::SharedMemory
+                );
+                zero_copy_conformance::verify_loaned_rx_payload_layout_for(
+                    &rx,
+                    mem::size_of::<NoZeroSensorFrame>(),
+                    mem::align_of::<NoZeroSensorFrame>(),
+                )?;
+                let frame = zero_copy_conformance::borrow_stable_payload::<NoZeroSensorFrame>(&rx)?;
+                assert_eq!(frame.header.case_id, 1);
+                assert_eq!(frame.header.sequence, 2);
+                assert_eq!(frame.header.logical_payload_len, 4096);
+                assert_eq!(frame.checksum, 0x5eed_cafe);
+                assert_eq!(frame.payload[0], 0x5a);
+                assert_eq!(frame.payload[4095], 0x5a);
+                sender.abort();
+                return Ok(());
+            }
+            Err(status) if status.get_code() == UCode::NOT_FOUND => {
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            Err(status) => return Err(status.into()),
+        }
+    }
+
+    sender.abort();
+    Err("timed out waiting for a no-zero stable zero-copy sample".into())
 }
 
 #[tokio::test(flavor = "multi_thread")]

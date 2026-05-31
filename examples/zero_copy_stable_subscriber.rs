@@ -21,12 +21,38 @@ use up_transport_iceoryx2_rust::{MessagingPattern, transport::UTransportIceoryx2
 
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Eq, PartialEq, up_rust::StablePayload, up_rust::ByteBackedStablePayload,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    up_rust::StablePayload,
+    up_rust::ByteBackedStablePayload,
+    up_rust::StablePayloadInit,
 )]
-#[stable_payload(type_name = "example.vehicle.VehiclePose")]
-struct VehiclePose {
-    x: u64,
-    y: u64,
+#[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorHeader")]
+struct NoZeroSensorHeader {
+    case_id: u32,
+    sequence: u32,
+    logical_payload_len: u32,
+}
+
+#[repr(C)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    up_rust::StablePayload,
+    up_rust::ByteBackedStablePayload,
+    up_rust::StablePayloadInit,
+)]
+#[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorFrame")]
+struct NoZeroSensorFrame {
+    header: NoZeroSensorHeader,
+    checksum: u32,
+    payload: [u8; 4096],
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -37,12 +63,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     loop {
         match transport.receive_zero_copy(&topic, None).await {
             Ok(rx) => {
-                let pose = rx.borrow_stable_payload::<VehiclePose>()?;
+                let sensor_frame = rx.borrow_stable_payload::<NoZeroSensorFrame>()?;
                 println!(
-                    "received stable shared-memory pose [source: {}, payload provenance: {:?}, pose: {:?}]",
+                    "received no-zero stable shared-memory sensor frame [source: {}, payload provenance: {:?}, sequence: {}, first payload byte: {}]",
                     rx.metadata().source().to_uri(false),
                     rx.payload_loan_provenance()?,
-                    pose
+                    sensor_frame.header.sequence,
+                    sensor_frame.payload[0]
                 );
             }
             Err(status) if status.get_code() == UCode::NOT_FOUND => {

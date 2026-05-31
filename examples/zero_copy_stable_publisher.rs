@@ -13,19 +13,43 @@
 
 use std::str::FromStr;
 
-use up_rust::{
-    UFrameMetadata, UUri, payload::StableContainerPayload, zero_copy::UZeroCopyUninitTransportExt,
-};
+use up_rust::{UFrameMetadata, UUri, zero_copy::UZeroCopyUninitTransportExt};
 use up_transport_iceoryx2_rust::{MessagingPattern, transport::UTransportIceoryx2};
 
 #[repr(C)]
 #[derive(
-    Clone, Copy, Debug, Eq, PartialEq, up_rust::StablePayload, up_rust::ByteBackedStablePayload,
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    up_rust::StablePayload,
+    up_rust::ByteBackedStablePayload,
+    up_rust::StablePayloadInit,
 )]
-#[stable_payload(type_name = "example.vehicle.VehiclePose")]
-struct VehiclePose {
-    x: u64,
-    y: u64,
+#[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorHeader")]
+struct NoZeroSensorHeader {
+    case_id: u32,
+    sequence: u32,
+    logical_payload_len: u32,
+}
+
+#[repr(C)]
+#[derive(
+    Clone,
+    Copy,
+    Debug,
+    Eq,
+    PartialEq,
+    up_rust::StablePayload,
+    up_rust::ByteBackedStablePayload,
+    up_rust::StablePayloadInit,
+)]
+#[stable_payload(type_name = "org.eclipse.uprotocol.transport.example.NoZeroSensorFrame")]
+struct NoZeroSensorFrame {
+    header: NoZeroSensorHeader,
+    checksum: u32,
+    payload: [u8; 4096],
 }
 
 #[tokio::main(flavor = "multi_thread")]
@@ -33,15 +57,24 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let topic = UUri::from_str("//my-vehicle/4210/1/9000")?;
     let transport = UTransportIceoryx2::build(MessagingPattern::PublishSubscribe)?;
 
-    for count in 1_u64..=50 {
-        let pose = VehiclePose {
-            x: count,
-            y: count * 10,
-        };
+    for sequence in 1_u32..=50 {
+        let checksum = 0x5eed_0000 | sequence;
         transport
-            .send_uninit_loaned_payload_as::<StableContainerPayload<VehiclePose>, VehiclePose>(
+            .send_uninit_stable_payload_as::<NoZeroSensorFrame>(
                 UFrameMetadata::try_publish(topic.clone())?,
-                |slot| Ok(slot.write(pose)),
+                |frame| {
+                    frame
+                        .header(|header| {
+                            header
+                                .case_id(1)
+                                .sequence(sequence)
+                                .logical_payload_len(4096)
+                                .finish()
+                        })?
+                        .checksum(checksum)
+                        .payload_fill(0x5a)
+                        .finish()
+                },
             )
             .await?;
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;

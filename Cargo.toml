@@ -32,7 +32,7 @@ harness = false
 required-features = ["benchmark-owned"]
 
 [dependencies]
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "f697559e0991fee4de2a2510f13b83607a03fc2c" }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "3a277c0a2323376c43bf486297b6b1cdedda7a6d" }
 async-trait = "0.1"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 iceoryx2 = "0.9.0"
@@ -42,7 +42,7 @@ hostname = "0.4.1"
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["csv_output"] }
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "f697559e0991fee4de2a2510f13b83607a03fc2c", features = ["protobuf-wire", "test-util"] }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "3a277c0a2323376c43bf486297b6b1cdedda7a6d", features = ["protobuf-wire", "test-util"] }
 
 [package.metadata.docs.rs]
 all-features = true
