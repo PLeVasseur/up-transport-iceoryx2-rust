@@ -1634,6 +1634,8 @@ dependencies = [
  "iceoryx2",
  "iceoryx2-bb-container",
  "protobuf",
+ "protobuf-codegen",
+ "protoc-bin-vendored",
  "tokio",
  "up-rust",
 ]

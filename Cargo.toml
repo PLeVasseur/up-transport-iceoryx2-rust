@@ -15,6 +15,7 @@
 name = "up-transport-iceoryx2-rust"
 version = "0.2.0"
 edition = "2024"
+build = "build.rs"
 rust-version = "1.88"
 description = "iceoryx2 zero-copy transport for native Eclipse uProtocol frames"
 keywords = ["uProtocol", "SDK", "communication", "iceoryx", "iceoryx2"]
@@ -25,6 +26,7 @@ repository = "https://github.com/eclipse-uprotocol/up-transport-iceoryx2-rust"
 [features]
 default = []
 benchmark-owned = []
+payload-contract-benchmarks = ["dep:protobuf-codegen", "dep:protoc-bin-vendored"]
 
 [[bench]]
 name = "transport_criterion"
@@ -38,6 +40,10 @@ tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "signal",
 iceoryx2 = "0.9.0"
 iceoryx2-bb-container = "0.9.0"
 hostname = "0.4.1"
+
+[build-dependencies]
+protobuf-codegen = { version = "3.7.2", optional = true }
+protoc-bin-vendored = { version = "3.2.0", optional = true }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["csv_output"] }
