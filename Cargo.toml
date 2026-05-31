@@ -15,7 +15,6 @@
 name = "up-transport-iceoryx2-rust"
 version = "0.2.0"
 edition = "2024"
-build = "build.rs"
 rust-version = "1.88"
 description = "iceoryx2 zero-copy transport for native Eclipse uProtocol frames"
 keywords = ["uProtocol", "SDK", "communication", "iceoryx", "iceoryx2"]
@@ -26,7 +25,11 @@ repository = "https://github.com/eclipse-uprotocol/up-transport-iceoryx2-rust"
 [features]
 default = []
 benchmark-owned = []
-payload-contract-benchmarks = ["dep:protobuf-codegen", "dep:protoc-bin-vendored"]
+payload-contract-benchmarks = ["up-rust/payload-contract-fixtures"]
+payload-contract-large-benchmarks = [
+    "payload-contract-benchmarks",
+    "up-rust/payload-contract-large-fixtures",
+]
 
 [[bench]]
 name = "transport_criterion"
@@ -34,21 +37,17 @@ harness = false
 required-features = ["benchmark-owned"]
 
 [dependencies]
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "3a277c0a2323376c43bf486297b6b1cdedda7a6d" }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "2fe440f93cb66d6c7a24b953cc26fd5670a1ad71" }
 async-trait = "0.1"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "signal", "time"] }
 iceoryx2 = "0.9.0"
 iceoryx2-bb-container = "0.9.0"
 hostname = "0.4.1"
 
-[build-dependencies]
-protobuf-codegen = { version = "3.7.2", optional = true }
-protoc-bin-vendored = { version = "3.2.0", optional = true }
-
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["csv_output"] }
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "3a277c0a2323376c43bf486297b6b1cdedda7a6d", features = ["protobuf-wire", "test-util"] }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "2fe440f93cb66d6c7a24b953cc26fd5670a1ad71", features = ["protobuf-wire", "test-util"] }
 
 [package.metadata.docs.rs]
 all-features = true
