@@ -49,6 +49,8 @@ use tokio::sync::RwLock;
 
 use crate::uprotocolheader::UProtocolHeader;
 
+#[cfg(feature = "benchmark-owned")]
+mod owned_benchmark;
 pub(crate) mod service_attributes;
 pub(crate) mod service_name_mapping;
 pub mod transport;
@@ -57,6 +59,9 @@ pub(crate) mod utransport_pubsub;
 pub(crate) mod workers;
 
 pub use iceoryx2::prelude::MessagingPattern;
+#[cfg(feature = "benchmark-owned")]
+#[cfg_attr(docsrs, doc(cfg(feature = "benchmark-owned")))]
+pub use owned_benchmark::BenchmarkOwnedIceoryx2PubSub;
 pub use utransport_pubsub::{
     Iceoryx2PubSub, Iceoryx2PubSubConfig, Iceoryx2PullMismatchQueueFullPolicy, Iceoryx2RxLease,
     Iceoryx2TxLoan, Iceoryx2UninitTxLoan, PullMismatchQueueDiagnostics,

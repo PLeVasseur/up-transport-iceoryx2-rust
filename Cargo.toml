@@ -22,6 +22,15 @@ license = "Apache-2.0"
 readme = "README.md"
 repository = "https://github.com/eclipse-uprotocol/up-transport-iceoryx2-rust"
 
+[features]
+default = []
+benchmark-owned = []
+
+[[bench]]
+name = "transport_criterion"
+harness = false
+required-features = ["benchmark-owned"]
+
 [dependencies]
 up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "f697559e0991fee4de2a2510f13b83607a03fc2c" }
 async-trait = "0.1"
@@ -31,6 +40,7 @@ iceoryx2-bb-container = "0.9.0"
 hostname = "0.4.1"
 
 [dev-dependencies]
+criterion = { version = "0.5.1", features = ["csv_output"] }
 protobuf = { version = "3.7.2", features = ["with-bytes"] }
 up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "f697559e0991fee4de2a2510f13b83607a03fc2c", features = ["protobuf-wire", "test-util"] }
 
