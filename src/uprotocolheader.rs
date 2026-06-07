@@ -14,6 +14,7 @@
 use iceoryx2::prelude::ZeroCopySend;
 use iceoryx2_bb_container::vec::FixedSizeVec;
 use std::{fmt, ops::Range};
+use up_rust::{PayloadEncoding, UCode, UFrameMetadata, UStatus};
 
 pub const MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH: usize = 1000;
 pub(crate) const FRAME_METADATA_MAGIC: [u8; 4] = *b"UFM1";
@@ -39,6 +40,33 @@ impl UProtocolHeader {
     ) -> Result<Iceoryx2PayloadLayout, FrameContractError> {
         let layout =
             Iceoryx2PayloadLayout::for_lengths(metadata_len, payload_len, payload_alignment)?;
+
+        self.metadata_len = u64::try_from(layout.metadata_len)
+            .map_err(|_| FrameContractError::FieldTooLarge("metadata_len"))?;
+        self.payload_offset = u64::try_from(layout.payload_offset)
+            .map_err(|_| FrameContractError::FieldTooLarge("payload_offset"))?;
+        self.payload_len = u64::try_from(layout.payload_len)
+            .map_err(|_| FrameContractError::FieldTooLarge("payload_len"))?;
+        self.payload_alignment = u64::try_from(layout.payload_alignment)
+            .map_err(|_| FrameContractError::FieldTooLarge("payload_alignment"))?;
+        Ok(layout)
+    }
+
+    pub(crate) fn write_payload_layout_at_offset(
+        &mut self,
+        metadata_len: usize,
+        payload_offset: usize,
+        payload_len: usize,
+        payload_alignment: usize,
+        sample_payload_len: usize,
+    ) -> Result<Iceoryx2PayloadLayout, FrameContractError> {
+        let layout = Iceoryx2PayloadLayout::validate(
+            metadata_len,
+            payload_offset,
+            payload_len,
+            payload_alignment,
+            sample_payload_len,
+        )?;
 
         self.metadata_len = u64::try_from(layout.metadata_len)
             .map_err(|_| FrameContractError::FieldTooLarge("metadata_len"))?;
@@ -152,13 +180,6 @@ impl Iceoryx2PayloadLayout {
                 payload_offset,
             });
         }
-        if !payload_offset.is_multiple_of(payload_alignment) {
-            return Err(FrameContractError::MisalignedPayloadOffset {
-                payload_offset,
-                payload_alignment,
-            });
-        }
-
         let required_len = payload_offset
             .checked_add(payload_len)
             .ok_or(FrameContractError::LayoutOverflow)?;
@@ -192,6 +213,13 @@ impl Iceoryx2PayloadLayout {
     }
 }
 
+pub(crate) fn encode_frame_metadata(header: &UFrameMetadata) -> Result<Vec<u8>, UStatus> {
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(&FRAME_METADATA_MAGIC);
+    write_optional_encoding(&mut bytes, header.payload_encoding())?;
+    Ok(bytes)
+}
+
 pub(crate) fn validate_metadata_prefix(metadata: &[u8]) -> Result<(), FrameContractError> {
     let Some(actual) = metadata.get(..FRAME_METADATA_MAGIC.len()) else {
         return Err(FrameContractError::InvalidMetadataPrefix);
@@ -202,16 +230,42 @@ pub(crate) fn validate_metadata_prefix(metadata: &[u8]) -> Result<(), FrameContr
     Ok(())
 }
 
+fn write_optional_encoding(
+    dst: &mut Vec<u8>,
+    value: Option<&PayloadEncoding>,
+) -> Result<(), UStatus> {
+    match value {
+        Some(PayloadEncoding::Standard(format)) => {
+            dst.push(1);
+            dst.push(0);
+            dst.extend_from_slice(&format.as_i32().to_le_bytes());
+        }
+        Some(PayloadEncoding::Custom { id, content_type }) => {
+            dst.push(1);
+            dst.push(1);
+            write_string(dst, id)?;
+            write_string(dst, content_type)?;
+        }
+        None => dst.push(0),
+    }
+    Ok(())
+}
+
+fn write_string(dst: &mut Vec<u8>, value: &str) -> Result<(), UStatus> {
+    let len = u32::try_from(value.len()).map_err(|_| {
+        UStatus::fail_with_code(UCode::InvalidArgument, "metadata field is too large")
+    })?;
+    dst.extend_from_slice(&len.to_le_bytes());
+    dst.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum FrameContractError {
     FieldTooLarge(&'static str),
     InvalidAlignment(usize),
     InvalidMetadataPrefix,
     LayoutOverflow,
-    MisalignedPayloadOffset {
-        payload_offset: usize,
-        payload_alignment: usize,
-    },
     PayloadOffsetBeforeMetadata {
         metadata_len: usize,
         payload_offset: usize,
@@ -232,13 +286,6 @@ impl fmt::Display for FrameContractError {
             ),
             Self::InvalidMetadataPrefix => f.write_str("invalid iceoryx2 frame metadata prefix"),
             Self::LayoutOverflow => f.write_str("iceoryx2 frame layout overflows usize"),
-            Self::MisalignedPayloadOffset {
-                payload_offset,
-                payload_alignment,
-            } => write!(
-                f,
-                "payload offset {payload_offset} is not aligned to {payload_alignment}"
-            ),
             Self::PayloadOffsetBeforeMetadata {
                 metadata_len,
                 payload_offset,
@@ -304,13 +351,6 @@ mod tests {
             FrameContractError::PayloadOffsetBeforeMetadata {
                 metadata_len: 5,
                 payload_offset: 4,
-            }
-        );
-        assert_eq!(
-            Iceoryx2PayloadLayout::validate(4, 6, 1, 4, 8).unwrap_err(),
-            FrameContractError::MisalignedPayloadOffset {
-                payload_offset: 6,
-                payload_alignment: 4,
             }
         );
         assert_eq!(

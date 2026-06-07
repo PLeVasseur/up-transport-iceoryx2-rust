@@ -34,6 +34,7 @@ pub(crate) mod utransport_pubsub;
 pub(crate) mod workers;
 
 pub use iceoryx2::prelude::MessagingPattern;
+pub use utransport_pubsub::{Iceoryx2PubSub, Iceoryx2TxLoan, Iceoryx2UninitTxLoan};
 
 pub trait BaseUserHeader: Debug + ZeroCopySend {}
 pub trait BasePayload: Debug + ZeroCopySend {}

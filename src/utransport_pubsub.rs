@@ -12,8 +12,10 @@
 // // ################################################################################
 
 use async_trait::async_trait;
+use iceoryx2::port::LoanError;
 use iceoryx2::prelude::{AllocationStrategy, MessagingPattern};
 use iceoryx2::sample_mut::SampleMut;
+use iceoryx2::sample_mut_uninit::SampleMutUninit;
 use iceoryx2::{
     node::{Node, NodeBuilder},
     port::{publisher::Publisher, subscriber::Subscriber},
@@ -21,11 +23,12 @@ use iceoryx2::{
     service::ipc_threadsafe,
 };
 use iceoryx2_bb_container::vec::FixedSizeVec;
-use std::collections::HashMap;
-use std::sync::Arc;
+use std::{collections::HashMap, mem::MaybeUninit, sync::Arc};
 use tokio::sync::RwLock;
 use up_rust::{
-    ComparableListener, ProtobufMappable, UCode, UListener, UMessage, UStatus, UTransport, UUri,
+    ComparableListener, ProtobufMappable, UCode, UFrameMetadata, UListener, UMessage, UStatus,
+    UTransport, UTxBuffer, UUninitTxBuffer, UUri, UVecRxLease, UZeroCopyTransportImpl,
+    UZeroCopyUninitTransportImpl, ValidatedTxLoanSpec,
 };
 
 use crate::UPROTOCOL_MAJOR_VERSION;
@@ -34,8 +37,12 @@ use crate::workers::dispatcher::Iceoryx2WorkerDispatcher;
 use crate::{
     ListenerMap, PublisherSet, SubscriberSet,
     service_name_mapping::compute_service_name,
-    uprotocolheader::{UProtocolHeader, validate_metadata_prefix},
+    uprotocolheader::{UProtocolHeader, encode_frame_metadata, validate_metadata_prefix},
 };
+
+type IpcSampleMut = SampleMut<ipc_threadsafe::Service, [u8], UProtocolHeader>;
+type IpcSampleMutUninit =
+    SampleMutUninit<ipc_threadsafe::Service, [MaybeUninit<u8>], UProtocolHeader>;
 
 #[derive(Debug)]
 pub struct Iceoryx2PubSub {
@@ -221,6 +228,338 @@ impl Iceoryx2PubSub {
     }
 }
 
+/// iceoryx2 transmit loan for one native uProtocol frame.
+pub struct Iceoryx2TxLoan {
+    metadata: UFrameMetadata,
+    sample: IpcSampleMut,
+    payload_offset: usize,
+    payload_len: usize,
+}
+
+/// iceoryx2 transmit loan whose application payload bytes are not initialized yet.
+pub struct Iceoryx2UninitTxLoan {
+    metadata: UFrameMetadata,
+    sample: IpcSampleMutUninit,
+    payload_offset: usize,
+    payload_len: usize,
+}
+
+impl UTxBuffer for Iceoryx2TxLoan {
+    fn metadata(&self) -> &UFrameMetadata {
+        &self.metadata
+    }
+
+    fn payload(&self) -> &[u8] {
+        let end = self
+            .payload_offset
+            .checked_add(self.payload_len)
+            .expect("loaned payload layout overflow");
+        self.sample
+            .payload()
+            .get(self.payload_offset..end)
+            .expect("loaned payload layout should be valid")
+    }
+
+    fn payload_mut(&mut self) -> &mut [u8] {
+        let end = self
+            .payload_offset
+            .checked_add(self.payload_len)
+            .expect("loaned payload layout overflow");
+        self.sample
+            .payload_mut()
+            .get_mut(self.payload_offset..end)
+            .expect("loaned payload layout should be valid")
+    }
+}
+
+impl UUninitTxBuffer for Iceoryx2UninitTxLoan {
+    type Initialized = Iceoryx2TxLoan;
+
+    fn metadata(&self) -> &UFrameMetadata {
+        &self.metadata
+    }
+
+    fn payload_len(&self) -> usize {
+        self.payload_len
+    }
+
+    fn payload_uninit_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+        let end = self
+            .payload_offset
+            .checked_add(self.payload_len)
+            .expect("loaned payload layout overflow");
+        self.sample
+            .payload_mut()
+            .get_mut(self.payload_offset..end)
+            .expect("loaned payload layout should be valid")
+    }
+
+    unsafe fn assume_payload_init(self) -> Self::Initialized {
+        let mut sample = self.sample;
+        let payload_end = self
+            .payload_offset
+            .checked_add(self.payload_len)
+            .expect("loaned payload layout overflow");
+        let trailing = sample
+            .payload_mut()
+            .get_mut(payload_end..)
+            .expect("loaned trailing padding range should be valid");
+        for byte in trailing {
+            byte.write(0);
+        }
+
+        Iceoryx2TxLoan {
+            metadata: self.metadata,
+            // SAFETY: the caller guarantees the visible payload bytes were initialized;
+            // this method initializes the remaining sample bytes before committing it.
+            sample: unsafe { sample.assume_init() },
+            payload_offset: self.payload_offset,
+            payload_len: self.payload_len,
+        }
+    }
+}
+
+#[async_trait]
+impl UZeroCopyTransportImpl for Iceoryx2PubSub {
+    type Tx = Iceoryx2TxLoan;
+    type Rx = UVecRxLease;
+
+    async fn loan_validated_tx(&self, spec: ValidatedTxLoanSpec) -> Result<Self::Tx, UStatus> {
+        let metadata = spec.metadata().clone();
+        let payload_len = spec.payload_len();
+        let alignment = spec.payload_alignment();
+        validate_alignment(alignment)?;
+        let source = metadata.attributes().source();
+        let service_name = compute_service_name(
+            source,
+            metadata.attributes().sink(),
+            MessagingPattern::PublishSubscribe,
+        )?;
+        let metadata_prefix = encode_frame_metadata(&metadata)?;
+        let metadata_len = metadata_prefix.len();
+        let publisher = self.get_or_create_publisher(service_name).await?;
+        let sample_len = worst_case_aligned_sample_len(metadata_len, payload_len, alignment)?;
+        let mut sample = publisher
+            .loan_slice(sample_len)
+            .map_err(|e| map_loan_error(e, "loan sample"))?;
+        let payload_offset =
+            aligned_payload_offset(sample.payload().as_ptr() as usize, metadata_len, alignment)?;
+        let aligned_sample_len = payload_offset.checked_add(payload_len).ok_or_else(|| {
+            UStatus::fail_with_code(UCode::InvalidArgument, "sample length overflow")
+        })?;
+        if aligned_sample_len > sample.payload().len() {
+            return Err(UStatus::fail_with_code(
+                UCode::Internal,
+                "reserved sample is too small for aligned payload layout",
+            ));
+        }
+        sample
+            .payload_mut()
+            .get_mut(..metadata_len)
+            .ok_or_else(|| {
+                UStatus::fail_with_code(UCode::Internal, "failed to access metadata prefix")
+            })?
+            .copy_from_slice(&metadata_prefix);
+        let sample_payload_len = sample.payload().len();
+        write_frame_user_header(
+            sample.user_header_mut(),
+            &metadata,
+            metadata_len,
+            payload_offset,
+            payload_len,
+            alignment,
+            sample_payload_len,
+        )?;
+        Ok(Iceoryx2TxLoan {
+            metadata,
+            sample,
+            payload_offset,
+            payload_len,
+        })
+    }
+
+    async fn send_validated_zero_copy(&self, buffer: Self::Tx) -> Result<(), UStatus> {
+        buffer.sample.send().map_err(|e| {
+            UStatus::fail_with_code(UCode::Internal, format!("Failed to send: {e}"))
+        })?;
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl UZeroCopyUninitTransportImpl for Iceoryx2PubSub {
+    type UninitTx = Iceoryx2UninitTxLoan;
+
+    async fn loan_validated_uninit_tx(
+        &self,
+        spec: ValidatedTxLoanSpec,
+    ) -> Result<Self::UninitTx, UStatus> {
+        let metadata = spec.metadata().clone();
+        let payload_len = spec.payload_len();
+        let alignment = spec.payload_alignment();
+        validate_alignment(alignment)?;
+        let source = metadata.attributes().source();
+        let service_name = compute_service_name(
+            source,
+            metadata.attributes().sink(),
+            MessagingPattern::PublishSubscribe,
+        )?;
+        let metadata_prefix = encode_frame_metadata(&metadata)?;
+        let metadata_len = metadata_prefix.len();
+        let publisher = self.get_or_create_publisher(service_name).await?;
+        let sample_len = worst_case_aligned_sample_len(metadata_len, payload_len, alignment)?;
+        let mut sample = publisher
+            .loan_slice_uninit(sample_len)
+            .map_err(|e| map_loan_error(e, "loan uninitialized sample"))?;
+        let payload_offset = aligned_payload_offset(
+            sample.payload_mut().as_ptr() as usize,
+            metadata_len,
+            alignment,
+        )?;
+        let aligned_sample_len = payload_offset.checked_add(payload_len).ok_or_else(|| {
+            UStatus::fail_with_code(UCode::InvalidArgument, "sample length overflow")
+        })?;
+        if aligned_sample_len > sample.payload_mut().len() {
+            return Err(UStatus::fail_with_code(
+                UCode::Internal,
+                "reserved uninitialized sample is too small for aligned payload layout",
+            ));
+        }
+        write_uninit_bytes(sample.payload_mut(), 0, &metadata_prefix)?;
+        initialize_uninit_range(sample.payload_mut(), metadata_len, payload_offset)?;
+        let sample_payload_len = sample.payload_mut().len();
+        write_frame_user_header(
+            sample.user_header_mut(),
+            &metadata,
+            metadata_len,
+            payload_offset,
+            payload_len,
+            alignment,
+            sample_payload_len,
+        )?;
+        Ok(Iceoryx2UninitTxLoan {
+            metadata,
+            sample,
+            payload_offset,
+            payload_len,
+        })
+    }
+}
+
+fn write_frame_user_header(
+    user_header: &mut UProtocolHeader,
+    metadata: &UFrameMetadata,
+    metadata_len: usize,
+    payload_offset: usize,
+    payload_len: usize,
+    payload_alignment: usize,
+    sample_payload_len: usize,
+) -> Result<(), UStatus> {
+    user_header.uprotocol_major_version = UPROTOCOL_MAJOR_VERSION;
+    let serialized_uattributes = metadata
+        .attributes()
+        .write_to_protobuf_bytes()
+        .map_err(|e| UStatus::fail_with_code(UCode::Internal, e.to_string()))?;
+    let mut fixed_sized_vec: FixedSizeVec<u8, MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH> =
+        FixedSizeVec::new();
+    for byte in serialized_uattributes.iter() {
+        fixed_sized_vec.push(*byte);
+    }
+    user_header.uattributes_serialized = fixed_sized_vec;
+    user_header
+        .write_payload_layout_at_offset(
+            metadata_len,
+            payload_offset,
+            payload_len,
+            payload_alignment,
+            sample_payload_len,
+        )
+        .map_err(frame_contract_error_to_status)?;
+    Ok(())
+}
+
+fn validate_alignment(alignment: usize) -> Result<(), UStatus> {
+    if alignment == 0 || !alignment.is_power_of_two() {
+        return Err(UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            "payload alignment must be a non-zero power of two",
+        ));
+    }
+    Ok(())
+}
+
+fn map_loan_error(error: LoanError, operation: &str) -> UStatus {
+    let code = match error {
+        LoanError::OutOfMemory | LoanError::ExceedsMaxLoans | LoanError::ExceedsMaxLoanSize => {
+            UCode::ResourceExhausted
+        }
+        LoanError::InternalFailure => UCode::Internal,
+    };
+    UStatus::fail_with_code(code, format!("Failed to {operation}: {error}"))
+}
+
+fn write_uninit_bytes(
+    sample: &mut [MaybeUninit<u8>],
+    offset: usize,
+    bytes: &[u8],
+) -> Result<(), UStatus> {
+    let end = offset.checked_add(bytes.len()).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::InvalidArgument, "sample initialization overflow")
+    })?;
+    let dst = sample.get_mut(offset..end).ok_or_else(|| {
+        UStatus::fail_with_code(
+            UCode::Internal,
+            "failed to access uninitialized sample range",
+        )
+    })?;
+    for (dst, src) in dst.iter_mut().zip(bytes) {
+        dst.write(*src);
+    }
+    Ok(())
+}
+
+fn initialize_uninit_range(
+    sample: &mut [MaybeUninit<u8>],
+    start: usize,
+    end: usize,
+) -> Result<(), UStatus> {
+    let dst = sample.get_mut(start..end).ok_or_else(|| {
+        UStatus::fail_with_code(
+            UCode::Internal,
+            "failed to access uninitialized sample range",
+        )
+    })?;
+    for byte in dst {
+        byte.write(0);
+    }
+    Ok(())
+}
+
+fn worst_case_aligned_sample_len(
+    metadata_len: usize,
+    payload_len: usize,
+    alignment: usize,
+) -> Result<usize, UStatus> {
+    metadata_len
+        .checked_add(alignment - 1)
+        .and_then(|len| len.checked_add(payload_len))
+        .ok_or_else(|| UStatus::fail_with_code(UCode::InvalidArgument, "sample length overflow"))
+}
+
+fn aligned_payload_offset(
+    payload_base: usize,
+    metadata_len: usize,
+    alignment: usize,
+) -> Result<usize, UStatus> {
+    let payload_start = payload_base.checked_add(metadata_len).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::InvalidArgument, "payload address overflow")
+    })?;
+    let padding = (alignment - (payload_start & (alignment - 1))) & (alignment - 1);
+    metadata_len
+        .checked_add(padding)
+        .ok_or_else(|| UStatus::fail_with_code(UCode::InvalidArgument, "payload offset overflow"))
+}
+
 #[async_trait]
 impl UTransport for Iceoryx2PubSub {
     /// ## DISCLAIMER
@@ -321,4 +660,76 @@ impl UTransport for Iceoryx2PubSub {
 
 fn frame_contract_error_to_status(error: impl std::fmt::Display) -> UStatus {
     UStatus::fail_with_code(UCode::InvalidArgument, error.to_string())
+}
+
+#[cfg(test)]
+mod zero_copy_tx_tests {
+    use super::*;
+    use tokio::sync::{Mutex, MutexGuard};
+    use up_rust::{
+        UMessageBuilder, UPayloadFormat, UTxLoanSpec, UZeroCopyTransport, UZeroCopyUninitTransport,
+        try_project_umessage_to_frame_metadata,
+    };
+
+    static ICEORYX2_TEST_MUTEX: Mutex<()> = Mutex::const_new(());
+
+    async fn iceoryx2_test_guard() -> MutexGuard<'static, ()> {
+        ICEORYX2_TEST_MUTEX.lock().await
+    }
+
+    fn test_metadata(test_name: &str) -> Result<UFrameMetadata, Box<dyn std::error::Error>> {
+        let authority = format!("iox-{test_name}-{}", std::process::id());
+        let topic = UUri::try_from_parts(&authority, 0x4210, 1, 0x9002)?;
+        let mut builder = UMessageBuilder::publish(topic);
+        let message = builder.build_with_payload(Vec::<u8>::new(), UPayloadFormat::Raw)?;
+        Ok(try_project_umessage_to_frame_metadata(&message)?)
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn initialized_tx_loan_exposes_aligned_payload_range()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = iceoryx2_test_guard().await;
+        let transport = Iceoryx2PubSub::new();
+        let metadata = test_metadata("tx-loan")?;
+        let mut loan = transport
+            .loan_tx(UTxLoanSpec::payload(metadata.clone(), 32, 64)?)
+            .await?;
+
+        assert_eq!(loan.metadata(), &metadata);
+        assert_eq!(loan.payload().len(), 32);
+        assert_eq!(loan.payload().as_ptr() as usize % 64, 0);
+        loan.payload_mut().copy_from_slice(&[0x5a; 32]);
+
+        transport.send_zero_copy(loan).await?;
+        Ok(())
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn uninit_tx_loan_commits_initialized_payload_without_zero_fill()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let _guard = iceoryx2_test_guard().await;
+        let transport = Iceoryx2PubSub::new();
+        let metadata = test_metadata("uninit-tx-loan")?;
+        let mut loan = transport
+            .loan_uninit_tx(UTxLoanSpec::payload(metadata.clone(), 48, 128)?)
+            .await?;
+
+        assert_eq!(loan.metadata(), &metadata);
+        assert_eq!(loan.payload_len(), 48);
+        let expected: Vec<u8> = (0..48).map(|value| value as u8).collect();
+        {
+            let payload = loan.payload_uninit_mut();
+            assert_eq!(payload.as_ptr() as usize % 128, 0);
+            for (slot, value) in payload.iter_mut().zip(&expected) {
+                slot.write(*value);
+            }
+        }
+
+        // SAFETY: every visible payload byte was initialized immediately above.
+        let loan = unsafe { loan.assume_payload_init() };
+        assert_eq!(loan.payload(), expected.as_slice());
+
+        transport.send_zero_copy(loan).await?;
+        Ok(())
+    }
 }
