@@ -24,7 +24,7 @@ impl UTransportIceoryx2 {
         match messaging_pattern {
             MessagingPattern::PublishSubscribe => Ok(UTransportIceoryx2::build_publish_subscribe()),
             _ => Err(UStatus::fail_with_code(
-                UCode::UNIMPLEMENTED,
+                UCode::Unimplemented,
                 "Unimplemented messaging pattern",
             )),
         }

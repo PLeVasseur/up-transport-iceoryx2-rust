@@ -29,13 +29,13 @@ fn encode_hex(value: u32) -> String {
 }
 
 fn get_authority_name(source_uuri: &UUri) -> String {
-    if source_uuri.authority_name.is_empty() {
+    if source_uuri.authority_name().is_empty() {
         match hostname::get().unwrap().into_string() {
             Ok(hostname) => hostname,
             Err(_) => "unknown".to_string(),
         }
     } else {
-        source_uuri.authority_name.clone()
+        source_uuri.authority_name().to_string()
     }
 }
 
@@ -45,17 +45,17 @@ fn determine_message_type(
     messaging_pattern: MessagingPattern,
 ) -> Result<UMessageType, UStatus> {
     if is_a_publish(source, messaging_pattern) {
-        return Ok(UMessageType::UMESSAGE_TYPE_PUBLISH);
+        return Ok(UMessageType::Publish);
     }
 
     Err(UStatus::fail_with_code(
-        UCode::INVALID_ARGUMENT,
+        UCode::InvalidArgument,
         "Could not determine a valid UMessageType from the provided UUri(s)",
     ))
 }
 
 fn is_a_publish(source: &UUri, messaging_pattern: MessagingPattern) -> bool {
-    !source.is_empty() && messaging_pattern == MessagingPattern::PublishSubscribe
+    !source.authority_name().is_empty() && messaging_pattern == MessagingPattern::PublishSubscribe
 }
 
 pub fn compute_service_name(
@@ -66,27 +66,24 @@ pub fn compute_service_name(
     let join_segments = |segments: Vec<String>| segments.join("/");
     let message_type = determine_message_type(source, sink, messaging_pattern)?;
     let service_name_str = match message_type {
-        UMessageType::UMESSAGE_TYPE_REQUEST => {
+        UMessageType::Request => {
             let Some(sink_uri) = sink else {
                 return Err(UStatus::fail_with_code(
-                    UCode::INVALID_ARGUMENT,
-                    format!(
-                        "sink required for UMessageType {:?}",
-                        UMessageType::UMESSAGE_TYPE_REQUEST
-                    ),
+                    UCode::InvalidArgument,
+                    format!("sink required for UMessageType {:?}", UMessageType::Request),
                 ));
             };
             let segments = encode_uuri_segments(sink_uri);
             format!("up/{}", join_segments(segments))
         }
-        UMessageType::UMESSAGE_TYPE_RESPONSE | UMessageType::UMESSAGE_TYPE_NOTIFICATION => {
+        UMessageType::Response | UMessageType::Notification => {
             let Some(sink_uri) = sink else {
                 return Err(UStatus::fail_with_code(
-                    UCode::INVALID_ARGUMENT,
+                    UCode::InvalidArgument,
                     format!(
                         "sink required for UMessageType {:?} or {:?}",
-                        UMessageType::UMESSAGE_TYPE_RESPONSE,
-                        UMessageType::UMESSAGE_TYPE_NOTIFICATION
+                        UMessageType::Response,
+                        UMessageType::Notification
                     ),
                 ));
             };
@@ -98,15 +95,9 @@ pub fn compute_service_name(
                 join_segments(sink_segments)
             )
         }
-        UMessageType::UMESSAGE_TYPE_PUBLISH => {
+        UMessageType::Publish => {
             let segments = encode_uuri_segments(source);
             format!("up/{}", join_segments(segments))
-        }
-        _ => {
-            return Err(UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
-                "Unsupported UMessageType for service name computation",
-            ));
         }
     };
     Ok(ServiceName::new(service_name_str.as_str()).expect("Failed to create service name"))
@@ -121,6 +112,10 @@ mod tests {
     fn test_uri(authority: &str, instance: u16, typ: u16, version: u8, resource: u16) -> UUri {
         let entity_id = ((instance as u32) << 16) | (typ as u32);
         UUri::try_from_parts(authority, entity_id, version, resource).unwrap()
+    }
+
+    fn empty_uri() -> UUri {
+        UUri::try_from_parts("", 0, 0, 0).unwrap()
     }
 
     // performing successful tests for service name computation
@@ -141,11 +136,11 @@ mod tests {
     // .specitem[dsn~up-attributes-response-source~1]
     // .specitem[dsn~up-attributes-notification-source~1]
     fn test_missing_uri_error() {
-        let uuri = UUri::new();
+        let uuri = empty_uri();
         let result = compute_service_name(&uuri, None, MessagingPattern::PublishSubscribe);
 
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().get_code(), UCode::INVALID_ARGUMENT);
+        assert_eq!(result.unwrap_err().get_code(), UCode::InvalidArgument);
     }
 
     #[test]
@@ -155,7 +150,7 @@ mod tests {
     fn test_fail_missing_sink_error() {
         let source = test_uri("device1", 0x0000, 0x00CD, 0x04, 0x000);
         let result = compute_service_name(&source, None, MessagingPattern::RequestResponse);
-        assert!(result.is_err_and(|err| err.get_code() == UCode::INVALID_ARGUMENT));
+        assert!(result.is_err_and(|err| err.get_code() == UCode::InvalidArgument));
     }
 
     #[test]
@@ -164,9 +159,9 @@ mod tests {
     // .specitem[dsn~up-attributes-response-source~1]
     // .specitem[dsn~up-attributes-notification-source~1]
     fn test_fail_missing_source_error() {
-        let uuri = UUri::new();
+        let uuri = empty_uri();
         let sink = test_uri("device1", 0x0004, 0x3AB, 0x3, 0x000);
         let result = compute_service_name(&uuri, Some(&sink), MessagingPattern::PublishSubscribe);
-        assert!(result.is_err_and(|err| err.get_code() == UCode::INVALID_ARGUMENT));
+        assert!(result.is_err_and(|err| err.get_code() == UCode::InvalidArgument));
     }
 }

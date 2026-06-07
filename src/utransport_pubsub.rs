@@ -21,18 +21,20 @@ use iceoryx2::{
     service::ipc_threadsafe,
 };
 use iceoryx2_bb_container::vec::FixedSizeVec;
-use protobuf::Message;
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
-use up_rust::{ComparableListener, UCode, UListener, UMessage, UStatus, UTransport, UUri};
+use up_rust::{
+    ComparableListener, ProtobufMappable, UCode, UListener, UMessage, UStatus, UTransport, UUri,
+};
 
 use crate::UPROTOCOL_MAJOR_VERSION;
 use crate::uprotocolheader::MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH;
 use crate::workers::dispatcher::Iceoryx2WorkerDispatcher;
 use crate::{
-    ListenerMap, PublisherSet, SubscriberSet, service_name_mapping::compute_service_name,
-    uprotocolheader::UProtocolHeader,
+    ListenerMap, PublisherSet, SubscriberSet,
+    service_name_mapping::compute_service_name,
+    uprotocolheader::{UProtocolHeader, validate_metadata_prefix},
 };
 
 #[derive(Debug)]
@@ -69,10 +71,10 @@ impl Iceoryx2PubSub {
             .user_header::<UProtocolHeader>()
             .open_or_create()
             .map_err(|e| {
-                UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to create service: {e}"))
+                UStatus::fail_with_code(UCode::Internal, format!("Failed to create service: {e}"))
             })?;
         let subscriber = service.subscriber_builder().create().map_err(|e| {
-            UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to create subscriber: {e}"))
+            UStatus::fail_with_code(UCode::Internal, format!("Failed to create subscriber: {e}"))
         })?;
         Ok(subscriber)
     }
@@ -99,7 +101,7 @@ impl Iceoryx2PubSub {
             .user_header::<UProtocolHeader>()
             .open_or_create()
             .map_err(|e| {
-                UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to create service: {e}"))
+                UStatus::fail_with_code(UCode::Internal, format!("Failed to create service: {e}"))
             })?;
 
         let publisher = service
@@ -107,7 +109,7 @@ impl Iceoryx2PubSub {
             .allocation_strategy(AllocationStrategy::PowerOfTwo)
             .create()
             .map_err(|e| {
-                UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to create publisher: {e}"))
+                UStatus::fail_with_code(UCode::Internal, format!("Failed to create publisher: {e}"))
             })?;
         let mut publishers = self.publishers.write().await;
         publishers.insert(service_name.clone(), Arc::new(publisher));
@@ -132,10 +134,25 @@ impl Iceoryx2PubSub {
         for (service_name, subscriber) in subscribers.iter() {
             match subscriber.receive() {
                 Ok(Some(sample)) => {
-                    let payload = sample.payload();
-                    let umessage = UMessage::parse_from_bytes(payload).map_err(|e| {
+                    let sample_payload = sample.payload();
+                    let layout = sample
+                        .user_header()
+                        .payload_layout(sample_payload.len())
+                        .map_err(frame_contract_error_to_status)?;
+                    if layout.metadata_len() > 0 {
+                        validate_metadata_prefix(
+                            layout
+                                .metadata_prefix(sample_payload)
+                                .map_err(frame_contract_error_to_status)?,
+                        )
+                        .map_err(frame_contract_error_to_status)?;
+                    }
+                    let payload = layout
+                        .payload(sample_payload)
+                        .map_err(frame_contract_error_to_status)?;
+                    let umessage = UMessage::parse_from_protobuf_bytes(payload).map_err(|e| {
                         UStatus::fail_with_code(
-                            UCode::INTERNAL,
+                            UCode::Internal,
                             format!("Failed to deserialize UMessage: {}", e),
                         )
                     })?;
@@ -151,7 +168,7 @@ impl Iceoryx2PubSub {
                 Ok(None) => continue, // No sample available
                 Err(e) => {
                     return Err(UStatus::fail_with_code(
-                        UCode::INTERNAL,
+                        UCode::Internal,
                         format!("Failed to receive sample: {e}"),
                     ));
                 }
@@ -165,18 +182,17 @@ impl Iceoryx2PubSub {
         publisher: &Publisher<ipc_threadsafe::Service, [u8], UProtocolHeader>,
         message: UMessage,
     ) -> Result<SampleMut<ipc_threadsafe::Service, [u8], UProtocolHeader>, UStatus> {
-        let sample_size = message.compute_size();
-        let mut sample = publisher
-            .loan_slice_uninit(sample_size as usize)
-            .map_err(|e| {
-                UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to loan sample: {e}"))
-            })?;
         let message_bytes = message
-            .write_to_bytes()
-            .map_err(|e| UStatus::fail_with_code(UCode::INTERNAL, e.to_string()))?;
+            .write_to_protobuf_bytes()
+            .map_err(|e| UStatus::fail_with_code(UCode::Internal, e.to_string()))?;
+        let mut sample = publisher
+            .loan_slice_uninit(message_bytes.len())
+            .map_err(|e| {
+                UStatus::fail_with_code(UCode::Internal, format!("Failed to loan sample: {e}"))
+            })?;
         let serialized_data = message_bytes.as_slice();
         let user_header: &mut UProtocolHeader = sample.user_header_mut();
-        self.set_samples_user_header(user_header, message)?;
+        self.set_samples_user_header(user_header, &message, serialized_data.len())?;
         let sample_final = sample.write_from_slice(serialized_data);
         Ok(sample_final)
     }
@@ -184,19 +200,23 @@ impl Iceoryx2PubSub {
     fn set_samples_user_header(
         &self,
         user_header: &mut UProtocolHeader,
-        message: UMessage,
+        message: &UMessage,
+        payload_len: usize,
     ) -> Result<(), UStatus> {
         user_header.uprotocol_major_version = UPROTOCOL_MAJOR_VERSION;
         let serialized_uattributes = message
-            .attributes
-            .write_to_bytes()
-            .map_err(|e| UStatus::fail_with_code(UCode::INTERNAL, e.to_string()))?;
+            .attributes()
+            .write_to_protobuf_bytes()
+            .map_err(|e| UStatus::fail_with_code(UCode::Internal, e.to_string()))?;
         let mut fixed_sized_vec: FixedSizeVec<u8, MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH> =
             FixedSizeVec::new();
         for byte in serialized_uattributes.iter() {
             fixed_sized_vec.push(*byte);
         }
         user_header.uattributes_serialized = fixed_sized_vec;
+        user_header
+            .write_payload_layout(0, payload_len, 1)
+            .map_err(frame_contract_error_to_status)?;
         Ok(())
     }
 }
@@ -220,8 +240,8 @@ impl UTransport for Iceoryx2PubSub {
     /// definition needs to be adjusted for this to truly be a zero-copy transport.
     async fn send(&self, message: UMessage) -> Result<(), UStatus> {
         let service_name = {
-            let source_filter = &message.attributes.source;
-            let sink_filter = message.attributes.sink.as_ref();
+            let source_filter = message.source();
+            let sink_filter = message.sink();
             compute_service_name(
                 source_filter,
                 sink_filter,
@@ -232,11 +252,11 @@ impl UTransport for Iceoryx2PubSub {
             .get_or_create_publisher(service_name)
             .await
             .map_err(|e| {
-                UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to get publisher: {e}"))
+                UStatus::fail_with_code(UCode::Internal, format!("Failed to get publisher: {e}"))
             })?;
         let sample_final = self.write_message_to_sample(publisher.as_ref(), message)?;
         sample_final.send().map_err(|e| {
-            UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to send: {e}"))
+            UStatus::fail_with_code(UCode::Internal, format!("Failed to send: {e}"))
         })?;
         Ok(())
     }
@@ -247,7 +267,7 @@ impl UTransport for Iceoryx2PubSub {
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UListener>,
     ) -> Result<(), UStatus> {
-        up_rust::verify_filter_criteria(source_filter, sink_filter)?;
+        up_rust::verify_filter_criteria(source_filter, sink_filter).map_err(|err| *err)?;
         let service_name = compute_service_name(
             source_filter,
             sink_filter,
@@ -280,7 +300,7 @@ impl UTransport for Iceoryx2PubSub {
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UListener>,
     ) -> Result<(), UStatus> {
-        up_rust::verify_filter_criteria(source_filter, sink_filter)?;
+        up_rust::verify_filter_criteria(source_filter, sink_filter).map_err(|err| *err)?;
         let service_name = compute_service_name(
             source_filter,
             sink_filter,
@@ -297,4 +317,8 @@ impl UTransport for Iceoryx2PubSub {
         }
         Ok(())
     }
+}
+
+fn frame_contract_error_to_status(error: impl std::fmt::Display) -> UStatus {
+    UStatus::fail_with_code(UCode::InvalidArgument, error.to_string())
 }
