@@ -12,6 +12,7 @@
 // ################################################################################
 
 use std::sync::{Arc, atomic::Ordering};
+use std::time::Duration;
 use up_rust::UStatus;
 
 use crate::{utransport_pubsub::Iceoryx2PubSub, workers::worker::Iceoryx2Worker};
@@ -27,6 +28,7 @@ impl Iceoryx2WorkerDispatcher {
     async fn run(worker: Iceoryx2Worker) -> Result<(), UStatus> {
         while worker.keep_alive.load(Ordering::Relaxed) {
             worker.transport.relay().await?;
+            tokio::time::sleep(Duration::from_millis(10)).await;
         }
         Ok(())
     }

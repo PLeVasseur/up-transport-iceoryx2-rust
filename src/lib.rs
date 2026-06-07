@@ -27,6 +27,7 @@ use up_rust::ComparableListener;
 
 use crate::uprotocolheader::UProtocolHeader;
 
+pub(crate) mod service_attributes;
 pub(crate) mod service_name_mapping;
 pub mod transport;
 pub(crate) mod uprotocolheader;
@@ -34,7 +35,10 @@ pub(crate) mod utransport_pubsub;
 pub(crate) mod workers;
 
 pub use iceoryx2::prelude::MessagingPattern;
-pub use utransport_pubsub::{Iceoryx2PubSub, Iceoryx2TxLoan, Iceoryx2UninitTxLoan};
+pub use utransport_pubsub::{
+    Iceoryx2PubSub, Iceoryx2PubSubConfig, Iceoryx2PullMismatchQueueFullPolicy, Iceoryx2RxLease,
+    Iceoryx2TxLoan, Iceoryx2UninitTxLoan, PullMismatchQueueDiagnostics,
+};
 
 pub trait BaseUserHeader: Debug + ZeroCopySend {}
 pub trait BasePayload: Debug + ZeroCopySend {}

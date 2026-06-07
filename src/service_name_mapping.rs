@@ -24,11 +24,11 @@ fn encode_uuri_segments(uuri: &UUri) -> Vec<String> {
     ]
 }
 
-fn encode_hex(value: u32) -> String {
+pub(crate) fn encode_hex(value: u32) -> String {
     format!("{value:X}")
 }
 
-fn get_authority_name(source_uuri: &UUri) -> String {
+pub(crate) fn get_authority_name(source_uuri: &UUri) -> String {
     if source_uuri.authority_name().is_empty() {
         match hostname::get().unwrap().into_string() {
             Ok(hostname) => hostname,

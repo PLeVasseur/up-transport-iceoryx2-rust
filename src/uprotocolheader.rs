@@ -14,7 +14,9 @@
 use iceoryx2::prelude::ZeroCopySend;
 use iceoryx2_bb_container::vec::FixedSizeVec;
 use std::{fmt, ops::Range};
-use up_rust::{PayloadEncoding, UCode, UFrameMetadata, UStatus};
+use up_rust::{
+    PayloadEncoding, ProtobufMappable, UAttributes, UCode, UFrameMetadata, UPayloadFormat, UStatus,
+};
 
 pub const MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH: usize = 1000;
 pub(crate) const FRAME_METADATA_MAGIC: [u8; 4] = *b"UFM1";
@@ -95,6 +97,43 @@ impl UProtocolHeader {
             sample_payload_len,
         )
     }
+
+    pub(crate) fn frame_metadata(&self, sample_payload: &[u8]) -> Result<UFrameMetadata, UStatus> {
+        if self.uprotocol_major_version != crate::UPROTOCOL_MAJOR_VERSION {
+            return Err(UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                "unsupported uProtocol major version",
+            ));
+        }
+
+        let layout = self
+            .payload_layout(sample_payload.len())
+            .map_err(|error| UStatus::fail_with_code(UCode::InvalidArgument, error.to_string()))?;
+        let metadata_prefix = layout
+            .metadata_prefix(sample_payload)
+            .map_err(|error| UStatus::fail_with_code(UCode::InvalidArgument, error.to_string()))?;
+        let payload_encoding = decode_frame_metadata(metadata_prefix)?;
+        if payload_encoding.is_none() && layout.payload_len() != 0 {
+            return Err(UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                "sample payload is present but payload encoding is absent",
+            ));
+        }
+
+        let uattributes: Vec<u8> = self.uattributes_serialized.iter().copied().collect();
+        let attributes = UAttributes::parse_from_protobuf_bytes(&uattributes).map_err(|error| {
+            UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                format!("failed to decode uAttributes from iceoryx2 user header: {error}"),
+            )
+        })?;
+        UFrameMetadata::new(attributes, payload_encoding).map_err(|error| {
+            UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                format!("invalid frame metadata from iceoryx2 sample: {error}"),
+            )
+        })
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,6 +171,10 @@ impl Iceoryx2PayloadLayout {
 
     pub(crate) fn metadata_len(&self) -> usize {
         self.metadata_len
+    }
+
+    pub(crate) fn payload_len(&self) -> usize {
+        self.payload_len
     }
 
     pub(crate) fn metadata_prefix<'a>(
@@ -230,6 +273,22 @@ pub(crate) fn validate_metadata_prefix(metadata: &[u8]) -> Result<(), FrameContr
     Ok(())
 }
 
+fn decode_frame_metadata(metadata: &[u8]) -> Result<Option<PayloadEncoding>, UStatus> {
+    validate_metadata_prefix(metadata)
+        .map_err(|error| UStatus::fail_with_code(UCode::InvalidArgument, error.to_string()))?;
+    let mut src = metadata
+        .get(FRAME_METADATA_MAGIC.len()..)
+        .ok_or_else(|| UStatus::fail_with_code(UCode::InvalidArgument, "invalid metadata"))?;
+    let encoding = read_optional_encoding(&mut src)?;
+    if !src.is_empty() {
+        return Err(UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            "trailing frame metadata bytes",
+        ));
+    }
+    Ok(encoding)
+}
+
 fn write_optional_encoding(
     dst: &mut Vec<u8>,
     value: Option<&PayloadEncoding>,
@@ -258,6 +317,87 @@ fn write_string(dst: &mut Vec<u8>, value: &str) -> Result<(), UStatus> {
     dst.extend_from_slice(&len.to_le_bytes());
     dst.extend_from_slice(value.as_bytes());
     Ok(())
+}
+
+fn read_optional_encoding(src: &mut &[u8]) -> Result<Option<PayloadEncoding>, UStatus> {
+    match read_u8(src)? {
+        0 => Ok(None),
+        1 => read_encoding(src).map(Some),
+        _ => Err(UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            "invalid optional metadata field",
+        )),
+    }
+}
+
+fn read_encoding(src: &mut &[u8]) -> Result<PayloadEncoding, UStatus> {
+    match read_u8(src)? {
+        0 => {
+            let value = read_i32(src)?;
+            let format = UPayloadFormat::from_i32(value).ok_or_else(|| {
+                UStatus::fail_with_code(
+                    UCode::InvalidArgument,
+                    format!("invalid standard payload format {value}"),
+                )
+            })?;
+            Ok(PayloadEncoding::Standard(format))
+        }
+        1 => PayloadEncoding::custom(read_string(src)?, read_string(src)?).map_err(|error| {
+            UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                format!("invalid custom payload encoding metadata: {error}"),
+            )
+        }),
+        _ => Err(UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            "invalid payload encoding kind",
+        )),
+    }
+}
+
+fn read_string(src: &mut &[u8]) -> Result<String, UStatus> {
+    let len = usize::try_from(read_u32(src)?).map_err(|_| {
+        UStatus::fail_with_code(UCode::InvalidArgument, "metadata length too large")
+    })?;
+    let bytes = read_bytes(src, len)?;
+    String::from_utf8(bytes.to_vec()).map_err(|error| {
+        UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            format!("metadata field is not valid UTF-8: {error}"),
+        )
+    })
+}
+
+fn read_i32(src: &mut &[u8]) -> Result<i32, UStatus> {
+    let bytes = read_bytes(src, 4)?;
+    Ok(i32::from_le_bytes(bytes.try_into().map_err(|_| {
+        UStatus::fail_with_code(UCode::InvalidArgument, "invalid metadata integer")
+    })?))
+}
+
+fn read_u32(src: &mut &[u8]) -> Result<u32, UStatus> {
+    let bytes = read_bytes(src, 4)?;
+    Ok(u32::from_le_bytes(bytes.try_into().map_err(|_| {
+        UStatus::fail_with_code(UCode::InvalidArgument, "invalid metadata length")
+    })?))
+}
+
+fn read_u8(src: &mut &[u8]) -> Result<u8, UStatus> {
+    let (value, remaining) = src
+        .split_first()
+        .ok_or_else(|| UStatus::fail_with_code(UCode::InvalidArgument, "invalid metadata"))?;
+    *src = remaining;
+    Ok(*value)
+}
+
+fn read_bytes<'a>(src: &mut &'a [u8], len: usize) -> Result<&'a [u8], UStatus> {
+    let value = src
+        .get(..len)
+        .ok_or_else(|| UStatus::fail_with_code(UCode::InvalidArgument, "invalid metadata"))?;
+    *src = src
+        .get(len..)
+        .ok_or_else(|| UStatus::fail_with_code(UCode::InvalidArgument, "invalid metadata"))?;
+    Ok(value)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
