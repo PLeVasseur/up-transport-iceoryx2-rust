@@ -20,7 +20,16 @@ keywords = ["uProtocol", "SDK", "communication", "iceoryx", "iceoryx2"]
 [features]
 default = []
 zero-copy = []
+benchmark-owned = ["up-rust/owned-frame-transport"]
 payload-contract-benchmarks = ["up-rust/payload-contract-fixtures"]
+payload-contract-large-benchmarks = [
+    "payload-contract-benchmarks",
+    "up-rust/payload-contract-large-fixtures",
+]
+
+[[bench]]
+name = "transport_criterion"
+harness = false
 
 [dependencies]
 up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "3467db44c427b0a7bd793ce65eeadaef205ca88d", default-features = false }
@@ -30,3 +39,6 @@ iceoryx2 = "0.7.0"
 iceoryx2-bb-container = "0.7.0"
 hostname = "0.4.1"
 protobuf = "3.7.2"
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["csv_output"] }
