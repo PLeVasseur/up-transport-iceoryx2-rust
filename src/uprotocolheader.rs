@@ -138,33 +138,14 @@ impl UProtocolHeader {
         let layout =
             Iceoryx2PayloadLayout::for_lengths(metadata_len, payload_len, payload_alignment)?;
 
-        self.metadata_len = u64::try_from(layout.metadata_len)
-            .map_err(|_| FrameContractError::FieldTooLarge("metadata_len"))?;
-        self.payload_offset = u64::try_from(layout.payload_offset)
-            .map_err(|_| FrameContractError::FieldTooLarge("payload_offset"))?;
-        self.payload_len = u64::try_from(layout.payload_len)
-            .map_err(|_| FrameContractError::FieldTooLarge("payload_len"))?;
-        self.payload_alignment = u64::try_from(layout.payload_alignment)
-            .map_err(|_| FrameContractError::FieldTooLarge("payload_alignment"))?;
+        self.write_validated_payload_layout(layout)?;
         Ok(layout)
     }
 
-    pub(crate) fn write_payload_layout_at_offset(
+    pub(crate) fn write_validated_payload_layout(
         &mut self,
-        metadata_len: usize,
-        payload_offset: usize,
-        payload_len: usize,
-        payload_alignment: usize,
-        sample_payload_len: usize,
-    ) -> Result<Iceoryx2PayloadLayout, FrameContractError> {
-        let layout = Iceoryx2PayloadLayout::validate(
-            metadata_len,
-            payload_offset,
-            payload_len,
-            payload_alignment,
-            sample_payload_len,
-        )?;
-
+        layout: Iceoryx2PayloadLayout,
+    ) -> Result<(), FrameContractError> {
         self.metadata_len = u64::try_from(layout.metadata_len)
             .map_err(|_| FrameContractError::FieldTooLarge("metadata_len"))?;
         self.payload_offset = u64::try_from(layout.payload_offset)
@@ -173,7 +154,7 @@ impl UProtocolHeader {
             .map_err(|_| FrameContractError::FieldTooLarge("payload_len"))?;
         self.payload_alignment = u64::try_from(layout.payload_alignment)
             .map_err(|_| FrameContractError::FieldTooLarge("payload_alignment"))?;
-        Ok(layout)
+        Ok(())
     }
 
     pub(crate) fn payload_layout(
@@ -193,7 +174,11 @@ impl UProtocolHeader {
         )
     }
 
-    pub(crate) fn frame_metadata(&self, sample_payload: &[u8]) -> Result<UFrameMetadata, UStatus> {
+    pub(crate) fn frame_metadata_from_layout(
+        &self,
+        sample_payload: &[u8],
+        layout: Iceoryx2PayloadLayout,
+    ) -> Result<UFrameMetadata, UStatus> {
         if self.uprotocol_major_version != crate::UPROTOCOL_MAJOR_VERSION {
             return Err(UStatus::fail_with_code(
                 UCode::InvalidArgument,
@@ -201,9 +186,6 @@ impl UProtocolHeader {
             ));
         }
 
-        let layout = self
-            .payload_layout(sample_payload.len())
-            .map_err(|error| UStatus::fail_with_code(UCode::InvalidArgument, error.to_string()))?;
         let metadata_prefix = layout
             .metadata_prefix(sample_payload)
             .map_err(|error| UStatus::fail_with_code(UCode::InvalidArgument, error.to_string()))?;
@@ -323,6 +305,27 @@ impl Iceoryx2PayloadLayout {
 
     pub(crate) fn payload_len(&self) -> usize {
         self.payload_len
+    }
+
+    pub(crate) fn payload_alignment(&self) -> usize {
+        self.payload_alignment
+    }
+
+    pub(crate) fn from_validated_parts(
+        metadata_len: usize,
+        payload_offset: usize,
+        payload_len: usize,
+        payload_alignment: usize,
+    ) -> Self {
+        debug_assert!(payload_alignment != 0);
+        debug_assert!(payload_alignment.is_power_of_two());
+        debug_assert!(payload_offset >= metadata_len);
+        Self {
+            metadata_len,
+            payload_offset,
+            payload_len,
+            payload_alignment,
+        }
     }
 
     pub(crate) fn metadata_prefix<'a>(

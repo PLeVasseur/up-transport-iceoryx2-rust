@@ -43,7 +43,9 @@ use crate::{
     ListenerMap, PublisherSet, SubscriberSet,
     service_attributes::{attributes_match_source_filter, source_attribute_verifier},
     service_name_mapping::compute_service_name,
-    uprotocolheader::{UProtocolHeader, encode_frame_metadata, validate_metadata_prefix},
+    uprotocolheader::{
+        Iceoryx2PayloadLayout, UProtocolHeader, encode_frame_metadata, validate_metadata_prefix,
+    },
 };
 
 type IpcSample = Sample<ipc_threadsafe::Service, [u8], UProtocolHeader>;
@@ -790,6 +792,12 @@ impl UZeroCopyTransportImpl for Iceoryx2PubSub {
                 "reserved sample is too small for aligned payload layout",
             ));
         }
+        let layout = Iceoryx2PayloadLayout::from_validated_parts(
+            metadata_len,
+            payload_offset,
+            payload_len,
+            alignment,
+        );
         sample
             .payload_mut()
             .get_mut(..metadata_len)
@@ -797,16 +805,7 @@ impl UZeroCopyTransportImpl for Iceoryx2PubSub {
                 UStatus::fail_with_code(UCode::Internal, "failed to access metadata prefix")
             })?
             .copy_from_slice(&metadata_prefix);
-        let sample_payload_len = sample.payload().len();
-        write_frame_user_header(
-            sample.user_header_mut(),
-            &metadata,
-            metadata_len,
-            payload_offset,
-            payload_len,
-            alignment,
-            sample_payload_len,
-        )?;
+        write_frame_user_header(sample.user_header_mut(), &metadata, layout)?;
         Ok(Iceoryx2TxLoan {
             metadata,
             sample,
@@ -942,18 +941,15 @@ impl UZeroCopyUninitTransportImpl for Iceoryx2PubSub {
                 "reserved uninitialized sample is too small for aligned payload layout",
             ));
         }
-        write_uninit_bytes(sample.payload_mut(), 0, &metadata_prefix)?;
-        initialize_uninit_range(sample.payload_mut(), metadata_len, payload_offset)?;
-        let sample_payload_len = sample.payload_mut().len();
-        write_frame_user_header(
-            sample.user_header_mut(),
-            &metadata,
+        let layout = Iceoryx2PayloadLayout::from_validated_parts(
             metadata_len,
             payload_offset,
             payload_len,
             alignment,
-            sample_payload_len,
-        )?;
+        );
+        write_uninit_bytes(sample.payload_mut(), 0, &metadata_prefix)?;
+        initialize_uninit_range(sample.payload_mut(), metadata_len, payload_offset)?;
+        write_frame_user_header(sample.user_header_mut(), &metadata, layout)?;
         Ok(Iceoryx2UninitTxLoan {
             metadata,
             sample,
@@ -971,8 +967,14 @@ fn lease_from_sample(sample: IpcSample) -> Result<Iceoryx2RxLease, UStatus> {
     let payload_range = layout.payload_range();
     let payload_offset = payload_range.start;
     let payload_len = payload_range.end - payload_range.start;
-    validate_payload_alignment(sample.user_header(), sample.payload(), payload_offset)?;
-    let metadata = sample.user_header().frame_metadata(sample.payload())?;
+    validate_payload_address_alignment(
+        sample.payload(),
+        payload_offset,
+        layout.payload_alignment(),
+    )?;
+    let metadata = sample
+        .user_header()
+        .frame_metadata_from_layout(sample.payload(), layout)?;
     Ok(Iceoryx2RxLease {
         metadata,
         sample,
@@ -984,22 +986,12 @@ fn lease_from_sample(sample: IpcSample) -> Result<Iceoryx2RxLease, UStatus> {
 fn write_frame_user_header(
     user_header: &mut UProtocolHeader,
     metadata: &UFrameMetadata,
-    metadata_len: usize,
-    payload_offset: usize,
-    payload_len: usize,
-    payload_alignment: usize,
-    sample_payload_len: usize,
+    layout: Iceoryx2PayloadLayout,
 ) -> Result<(), UStatus> {
     user_header.uprotocol_major_version = UPROTOCOL_MAJOR_VERSION;
     user_header.write_attributes(metadata.attributes())?;
     user_header
-        .write_payload_layout_at_offset(
-            metadata_len,
-            payload_offset,
-            payload_len,
-            payload_alignment,
-            sample_payload_len,
-        )
+        .write_validated_payload_layout(layout)
         .map_err(frame_contract_error_to_status)?;
     Ok(())
 }
@@ -1086,15 +1078,13 @@ fn aligned_payload_offset(
         .ok_or_else(|| UStatus::fail_with_code(UCode::InvalidArgument, "payload offset overflow"))
 }
 
-fn validate_payload_alignment(
-    header: &UProtocolHeader,
+fn validate_payload_address_alignment(
     sample_payload: &[u8],
     payload_offset: usize,
+    alignment: usize,
 ) -> Result<(), UStatus> {
-    let alignment = usize::try_from(header.payload_alignment).map_err(|_| {
-        UStatus::fail_with_code(UCode::InvalidArgument, "payload alignment exceeds usize")
-    })?;
-    validate_alignment(alignment)?;
+    debug_assert!(alignment != 0);
+    debug_assert!(alignment.is_power_of_two());
     let payload_address = (sample_payload.as_ptr() as usize)
         .checked_add(payload_offset)
         .ok_or_else(|| {
