@@ -23,7 +23,6 @@ use iceoryx2::{
     prelude::ServiceName,
     service::ipc_threadsafe,
 };
-use iceoryx2_bb_container::vec::FixedSizeVec;
 use std::{
     collections::{HashMap, VecDeque},
     io::Cursor,
@@ -36,11 +35,9 @@ use up_rust::{
     UFrameMetadata, UFrameView, UListener, ULoanedContiguousZeroCopyRxFrame, UMessage, UStatus,
     UTransport, UTxBuffer, UUninitTxBuffer, UUri, UZeroCopyListener, UZeroCopyRxLease,
     UZeroCopyTransportImpl, UZeroCopyUninitTransportImpl, ValidatedTxLoanSpec,
-    validate_frame_view_for_transport,
 };
 
 use crate::UPROTOCOL_MAJOR_VERSION;
-use crate::uprotocolheader::MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH;
 use crate::workers::dispatcher::Iceoryx2WorkerDispatcher;
 use crate::{
     ListenerMap, PublisherSet, SubscriberSet,
@@ -229,7 +226,7 @@ impl Iceoryx2PubSub {
         service_name: ServiceName,
         source: &UUri,
     ) -> Result<Arc<Publisher<ipc_threadsafe::Service, [u8], UProtocolHeader>>, UStatus> {
-        let publisher = self.get_publisher(service_name.clone()).await;
+        let publisher = self.get_publisher(service_name).await;
         if let Some(publisher) = publisher {
             return Ok(publisher);
         }
@@ -247,7 +244,7 @@ impl Iceoryx2PubSub {
         }
         drop(subscribers);
 
-        let subscriber = Arc::new(self.create_subscriber(service_name.clone(), source)?);
+        let subscriber = Arc::new(self.create_subscriber(service_name, source)?);
         let mut subscribers = self.pull_subscribers.write().await;
         subscribers.insert(service_name, subscriber.clone());
         Ok(subscriber)
@@ -278,7 +275,7 @@ impl Iceoryx2PubSub {
                 UStatus::fail_with_code(UCode::Internal, format!("Failed to create publisher: {e}"))
             })?;
         let mut publishers = self.publishers.write().await;
-        publishers.insert(service_name.clone(), Arc::new(publisher));
+        publishers.insert(service_name, Arc::new(publisher));
         let publisher = publishers.get(&service_name).unwrap();
         Ok(publisher.clone())
     }
@@ -387,10 +384,14 @@ impl Iceoryx2PubSub {
     }
 
     async fn refresh_listener_subscriptions(&self) -> Result<(), UStatus> {
+        if self.zero_copy_listeners.read().await.is_empty() {
+            return Ok(());
+        }
+
         let mut services = Vec::new();
         ipc_threadsafe::Service::list(self.node.config(), |service| {
             services.push((
-                service.static_details.name().clone(),
+                *service.static_details.name(),
                 service.static_details.attributes().clone(),
             ));
             CallbackProgression::Continue
@@ -407,10 +408,10 @@ impl Iceoryx2PubSub {
                 {
                     continue;
                 }
-                let subscriber = self.create_subscriber(service_name.clone(), None)?;
+                let subscriber = self.create_subscriber(*service_name, None)?;
                 registration
                     .subscribers
-                    .insert(service_name.clone(), Arc::new(subscriber));
+                    .insert(*service_name, Arc::new(subscriber));
             }
         }
         Ok(())
@@ -516,16 +517,7 @@ impl Iceoryx2PubSub {
         payload_len: usize,
     ) -> Result<(), UStatus> {
         user_header.uprotocol_major_version = UPROTOCOL_MAJOR_VERSION;
-        let serialized_uattributes = message
-            .attributes()
-            .write_to_protobuf_bytes()
-            .map_err(|e| UStatus::fail_with_code(UCode::Internal, e.to_string()))?;
-        let mut fixed_sized_vec: FixedSizeVec<u8, MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH> =
-            FixedSizeVec::new();
-        for byte in serialized_uattributes.iter() {
-            fixed_sized_vec.push(*byte);
-        }
-        user_header.uattributes_serialized = fixed_sized_vec;
+        user_header.write_attributes(message.attributes())?;
         user_header
             .write_payload_layout(0, payload_len, 1)
             .map_err(frame_contract_error_to_status)?;
@@ -841,7 +833,7 @@ impl UZeroCopyTransportImpl for Iceoryx2PubSub {
             MessagingPattern::PublishSubscribe,
         )?;
         let subscriber = self
-            .get_or_create_pull_subscriber(service_name.clone(), Some(source_filter))
+            .get_or_create_pull_subscriber(service_name, Some(source_filter))
             .await?;
         if let Some(lease) = self
             .pop_queued_pull_sample(&service_name, sink_filter)
@@ -856,7 +848,7 @@ impl UZeroCopyTransportImpl for Iceoryx2PubSub {
                 .ok_or_else(|| UStatus::fail_with_code(UCode::NotFound, "no sample available"))?;
             let lease = lease_from_sample(sample)?;
             if !sink_matches(lease.metadata().attributes().sink(), sink_filter) {
-                self.queue_pull_sample(service_name.clone(), lease).await?;
+                self.queue_pull_sample(service_name, lease).await?;
                 continue;
             }
             return Ok(lease);
@@ -886,7 +878,7 @@ impl UZeroCopyTransportImpl for Iceoryx2PubSub {
                 sink_filter,
                 MessagingPattern::PublishSubscribe,
             )?;
-            let subscriber = self.create_subscriber(service_name.clone(), Some(source_filter))?;
+            let subscriber = self.create_subscriber(service_name, Some(source_filter))?;
             registration
                 .subscribers
                 .insert(service_name, Arc::new(subscriber));
@@ -981,14 +973,12 @@ fn lease_from_sample(sample: IpcSample) -> Result<Iceoryx2RxLease, UStatus> {
     let payload_len = payload_range.end - payload_range.start;
     validate_payload_alignment(sample.user_header(), sample.payload(), payload_offset)?;
     let metadata = sample.user_header().frame_metadata(sample.payload())?;
-    let lease = Iceoryx2RxLease {
+    Ok(Iceoryx2RxLease {
         metadata,
         sample,
         payload_offset,
         payload_len,
-    };
-    validate_frame_view_for_transport(&lease)?;
-    Ok(lease)
+    })
 }
 
 fn write_frame_user_header(
@@ -1001,16 +991,7 @@ fn write_frame_user_header(
     sample_payload_len: usize,
 ) -> Result<(), UStatus> {
     user_header.uprotocol_major_version = UPROTOCOL_MAJOR_VERSION;
-    let serialized_uattributes = metadata
-        .attributes()
-        .write_to_protobuf_bytes()
-        .map_err(|e| UStatus::fail_with_code(UCode::Internal, e.to_string()))?;
-    let mut fixed_sized_vec: FixedSizeVec<u8, MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH> =
-        FixedSizeVec::new();
-    for byte in serialized_uattributes.iter() {
-        fixed_sized_vec.push(*byte);
-    }
-    user_header.uattributes_serialized = fixed_sized_vec;
+    user_header.write_attributes(metadata.attributes())?;
     user_header
         .write_payload_layout_at_offset(
             metadata_len,
@@ -1174,9 +1155,9 @@ impl UTransport for Iceoryx2PubSub {
             subscribers.contains_key(&service_name)
         };
         if !has_subscriber {
-            let subscriber = self.create_subscriber(service_name.clone(), Some(source_filter))?;
+            let subscriber = self.create_subscriber(service_name, Some(source_filter))?;
             let mut subscribers = self.subscribers.write().await;
-            subscribers.insert(service_name.clone(), Arc::new(subscriber));
+            subscribers.insert(service_name, Arc::new(subscriber));
         }
         if !self.listeners.read().await.contains_key(&service_name) {
             let mut listeners = self.listeners.write().await;

@@ -6,7 +6,7 @@
 
 #![allow(clippy::missing_panics_doc, clippy::too_many_lines)]
 
-use std::{sync::Arc, time::Duration};
+use std::{sync::Arc, time::Duration, time::SystemTime};
 
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use tokio::runtime::Runtime;
@@ -26,6 +26,7 @@ const BENCH_TIMEOUT: Duration = Duration::from_secs(5);
 const LARGE_SENSOR_BENCH_TIMEOUT: Duration = Duration::from_secs(30);
 const CORE_STATIC_ALLOCATION: usize = 128 * 1_024;
 const CAMERA_STATIC_ALLOCATION: usize = 16 * 1_024 * 1_024;
+const UUID_LSB_BASE: u64 = 0x8000_0000_0000_0000;
 #[cfg(feature = "payload-contract-benchmarks")]
 const PAYLOAD_CONTRACT_SEQUENCE: u32 = 1;
 
@@ -219,7 +220,7 @@ fn bench_payload_contract_matrix(
                 |b| {
                     b.iter(|| {
                         runtime.block_on(async {
-                            let id = UUID::build();
+                            let id = next_uuid();
                             send_payload_contract_path(
                                 transports,
                                 path,
@@ -640,6 +641,30 @@ fn bench_payload_contract(c: &mut Criterion, profile: BenchProfile) {
             LARGE_SENSOR_BENCH_TIMEOUT,
         );
     }
+}
+
+fn next_sequence() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static SEQUENCE: AtomicU64 = AtomicU64::new(1);
+    SEQUENCE.fetch_add(1, Ordering::Relaxed)
+}
+
+fn next_uuid() -> UUID {
+    uuid_for(next_sequence())
+}
+
+fn uuid_for(sequence: u64) -> UUID {
+    let timestamp_millis = u64::try_from(
+        SystemTime::UNIX_EPOCH
+            .elapsed()
+            .expect("system time should be after UNIX epoch")
+            .as_millis(),
+    )
+    .expect("timestamp millis should fit in u64");
+    let msb = (timestamp_millis << 16) | 0x7000 | (sequence & 0x0fff);
+    let lsb = UUID_LSB_BASE | (sequence & 0x3fff_ffff_ffff_ffff);
+    UUID::from_u64_pair(msb, lsb).expect("benchmark UUID should be valid UUIDv7")
 }
 
 #[cfg(not(feature = "payload-contract-benchmarks"))]

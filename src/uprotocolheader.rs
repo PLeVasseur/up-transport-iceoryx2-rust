@@ -12,21 +12,22 @@
 // ################################################################################
 
 use iceoryx2::prelude::ZeroCopySend;
-use iceoryx2_bb_container::vec::FixedSizeVec;
-use std::{fmt, ops::Range};
+use iceoryx2_bb_container::vector::{StaticVec, Vector};
+use std::{borrow::Cow, fmt, ops::Range};
 use up_rust::{
     PayloadEncoding, ProtobufMappable, UAttributes, UCode, UFrameMetadata, UPayloadFormat, UStatus,
 };
 
 pub const MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH: usize = 1000;
 pub(crate) const FRAME_METADATA_MAGIC: [u8; 4] = *b"UFM1";
+const FRAME_METADATA_WITHOUT_ENCODING: [u8; 5] = *b"UFM1\0";
 
 /// Also see [uAttributes Mapping to iceoryx2 user header](https://github.com/eclipse-uprotocol/up-spec/blob/0cc43c8afb7d7cbd3169ffe093be761c57308cef/up-l1/iceoryx2.adoc#411-uattributes-mapping-to-iceoryx2-user-header)
 #[repr(C)]
 #[derive(ZeroCopySend, Debug, Default)]
 pub struct UProtocolHeader {
     pub(crate) uprotocol_major_version: u8,
-    pub(crate) uattributes_serialized: FixedSizeVec<u8, MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH>,
+    pub(crate) uattributes_serialized: StaticVec<u8, MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH>,
     pub(crate) metadata_len: u64,
     pub(crate) payload_offset: u64,
     pub(crate) payload_len: u64,
@@ -34,6 +35,20 @@ pub struct UProtocolHeader {
 }
 
 impl UProtocolHeader {
+    pub(crate) fn write_attributes(&mut self, attributes: &UAttributes) -> Result<(), UStatus> {
+        let serialized_uattributes = attributes
+            .write_to_protobuf_bytes()
+            .map_err(|e| UStatus::fail_with_code(UCode::Internal, e.to_string()))?;
+        self.uattributes_serialized = StaticVec::try_from(serialized_uattributes.as_slice())
+            .map_err(|error| {
+                UStatus::fail_with_code(
+                    UCode::InvalidArgument,
+                    format!("serialized uAttributes exceed iceoryx2 user header capacity: {error}"),
+                )
+            })?;
+        Ok(())
+    }
+
     pub(crate) fn write_payload_layout(
         &mut self,
         metadata_len: usize,
@@ -120,13 +135,14 @@ impl UProtocolHeader {
             ));
         }
 
-        let uattributes: Vec<u8> = self.uattributes_serialized.iter().copied().collect();
-        let attributes = UAttributes::parse_from_protobuf_bytes(&uattributes).map_err(|error| {
-            UStatus::fail_with_code(
-                UCode::InvalidArgument,
-                format!("failed to decode uAttributes from iceoryx2 user header: {error}"),
-            )
-        })?;
+        let attributes =
+            UAttributes::parse_from_protobuf_bytes(self.uattributes_serialized.as_slice())
+                .map_err(|error| {
+                    UStatus::fail_with_code(
+                        UCode::InvalidArgument,
+                        format!("failed to decode uAttributes from iceoryx2 user header: {error}"),
+                    )
+                })?;
         UFrameMetadata::new(attributes, payload_encoding).map_err(|error| {
             UStatus::fail_with_code(
                 UCode::InvalidArgument,
@@ -256,11 +272,18 @@ impl Iceoryx2PayloadLayout {
     }
 }
 
-pub(crate) fn encode_frame_metadata(header: &UFrameMetadata) -> Result<Vec<u8>, UStatus> {
+pub(crate) fn encode_frame_metadata(
+    header: &UFrameMetadata,
+) -> Result<Cow<'static, [u8]>, UStatus> {
+    let payload_encoding = header.payload_encoding();
+    if payload_encoding.is_none() {
+        return Ok(Cow::Borrowed(&FRAME_METADATA_WITHOUT_ENCODING));
+    }
+
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&FRAME_METADATA_MAGIC);
-    write_optional_encoding(&mut bytes, header.payload_encoding())?;
-    Ok(bytes)
+    write_optional_encoding(&mut bytes, payload_encoding)?;
+    Ok(Cow::Owned(bytes))
 }
 
 pub(crate) fn validate_metadata_prefix(metadata: &[u8]) -> Result<(), FrameContractError> {
