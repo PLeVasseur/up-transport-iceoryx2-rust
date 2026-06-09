@@ -17,6 +17,10 @@ readonly TRANSPORT_NAME="iceoryx2"
 readonly DEFAULT_REPORT_DIR="target/transport-perf/$TRANSPORT_NAME"
 readonly DEFAULT_CRITERION_ARGS="--output-format bencher --sample-size 10 --warm-up-time 1 --measurement-time 2 --noise-threshold 0.05"
 readonly BASELINE_NAME="payload_contract_representative_v1"
+readonly ARS548_BASELINE_NS=8788
+readonly ARS548_GUARD_BOUND_NS=10106
+readonly STREAMER_64K_BASELINE_NS=14009
+readonly STREAMER_64K_GUARD_BOUND_NS=16811
 
 TRANSPORT_BENCH_SUITE="${TRANSPORT_BENCH_SUITE:-payload-contract}"
 TRANSPORT_BENCH_PROFILE="${TRANSPORT_BENCH_PROFILE:-all}"
@@ -120,6 +124,9 @@ write_summary() {
     local report_dir="$1"
     local zero_copy_raw_output="$2"
     local owned_raw_output="$3"
+    local zero_copy_criterion_dir="$4"
+    local owned_criterion_dir="$5"
+    local guard_comparison="$6"
     local summary="$report_dir/README.md"
     local zero_copy_features
     local owned_features
@@ -159,6 +166,9 @@ TRANSPORT_BENCH_SUITE=$TRANSPORT_BENCH_SUITE TRANSPORT_BENCH_PROFILE=$TRANSPORT_
 - Pinning prefix: \`${BENCH_PIN_PREFIX:-none}\`
 - Zero-copy raw output: \`$zero_copy_raw_output\`
 - Owned raw output: \`$owned_raw_output\`
+- Zero-copy Criterion artifacts: \`$zero_copy_criterion_dir\`
+- Owned Criterion artifacts: \`$owned_criterion_dir\`
+- Guard comparison: \`$guard_comparison\`
 
 ## Required Labels
 
@@ -168,8 +178,104 @@ TRANSPORT_BENCH_SUITE=$TRANSPORT_BENCH_SUITE TRANSPORT_BENCH_PROFILE=$TRANSPORT_
 
 ## Notes
 
-This script is the Phase 07C2 authority wrapper for the 07C1 representative-v1 command shapes. The owned path uses the benchmark-only copying \`BenchmarkOwnedIceoryx2PubSub\` wrapper behind \`benchmark-owned\`; it is not direct true zero-copy. Artifacts are written only under the caller-selected report directory.
+This script is the Phase 07C2 authority wrapper for the 07C1 representative-v1 command shapes, with Phase 10B artifact separation. The owned path uses the benchmark-only copying \`BenchmarkOwnedIceoryx2PubSub\` wrapper behind \`benchmark-owned\`; it is not direct true zero-copy. Raw and Criterion artifacts are separated by path so owned-run labels cannot overwrite or masquerade as true zero-copy evidence. Artifacts are written only under the caller-selected report directory.
 SUMMARY
+}
+
+copy_criterion_artifacts() {
+    local destination="$1"
+
+    rm -rf "$destination"
+    mkdir -p "$destination"
+    if [[ -d target/criterion ]]; then
+        cp -a target/criterion/. "$destination/"
+    fi
+}
+
+run_export_path() {
+    local path="$1"
+    local raw_output="$2"
+    local criterion_dir="$3"
+
+    rm -rf target/criterion
+    run_cargo_bench "$path" | tee "$raw_output"
+    copy_criterion_artifacts "$criterion_dir"
+}
+
+extract_guard_value() {
+    local raw_output="$1"
+    local payload_name="$2"
+    local line
+
+    while IFS= read -r line; do
+        if [[ "$line" == *"stable_zc_nozero_full"* && "$line" == *"$payload_name"* ]]; then
+            if [[ "$line" =~ bench:[[:space:]]*([0-9]+)[[:space:]]ns/iter[[:space:]]\(\+/-[[:space:]]*([0-9]+)\) ]]; then
+                printf '%s %s\n' "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}"
+                return 0
+            fi
+        fi
+    done <"$raw_output"
+
+    return 1
+}
+
+guard_status() {
+    local value_ns="$1"
+    local bound_ns="$2"
+
+    if ((value_ns <= bound_ns)); then
+        printf '%s\n' "pass"
+    else
+        printf '%s\n' "breach"
+    fi
+}
+
+write_guard_comparison() {
+    local report_dir="$1"
+    local zero_copy_raw_output="$2"
+    local guard_comparison="$3"
+    local ars548_ns="null"
+    local ars548_noise_ns="null"
+    local ars548_status="missing"
+    local streamer_64k_ns="null"
+    local streamer_64k_noise_ns="null"
+    local streamer_64k_status="missing"
+
+    if read -r ars548_ns ars548_noise_ns < <(extract_guard_value "$zero_copy_raw_output" "radar_ars548_detection_list"); then
+        ars548_status="$(guard_status "$ars548_ns" "$ARS548_GUARD_BOUND_NS")"
+    fi
+    if read -r streamer_64k_ns streamer_64k_noise_ns < <(extract_guard_value "$zero_copy_raw_output" "streamer_64k"); then
+        streamer_64k_status="$(guard_status "$streamer_64k_ns" "$STREAMER_64K_GUARD_BOUND_NS")"
+    fi
+
+    cat >"$guard_comparison" <<JSON
+{
+  "transport": "iceoryx2",
+  "source": "true-zero-copy raw bencher output",
+  "raw_output": "$zero_copy_raw_output",
+  "baseline": "payload-contract-representative-v1",
+  "rows": {
+    "radar_ars548_detection_list": {
+      "label": "stable_zc_nozero_full",
+      "candidate_ns_per_iter": $ars548_ns,
+      "noise_ns": $ars548_noise_ns,
+      "baseline_ns_per_iter": $ARS548_BASELINE_NS,
+      "guard_bound_ns_per_iter": $ARS548_GUARD_BOUND_NS,
+      "status": "$ars548_status"
+    },
+    "streamer_64k": {
+      "label": "stable_zc_nozero_full",
+      "candidate_ns_per_iter": $streamer_64k_ns,
+      "noise_ns": $streamer_64k_noise_ns,
+      "baseline_ns_per_iter": $STREAMER_64K_BASELINE_NS,
+      "guard_bound_ns_per_iter": $STREAMER_64K_GUARD_BOUND_NS,
+      "status": "$streamer_64k_status"
+    }
+  }
+}
+JSON
+
+    cp "$guard_comparison" "$report_dir/guardrail.json"
 }
 
 export_results() {
@@ -177,24 +283,16 @@ export_results() {
     local bench_data_dir="$report_dir/bench-data"
     local zero_copy_raw_output="$bench_data_dir/transport-criterion-zero-copy-bencher.txt"
     local owned_raw_output="$bench_data_dir/transport-criterion-owned-bencher.txt"
+    local zero_copy_criterion_dir="$report_dir/criterion-html-zero-copy"
+    local owned_criterion_dir="$report_dir/criterion-html-owned"
+    local guard_comparison="$report_dir/guard-comparison.json"
 
     mkdir -p "$bench_data_dir"
-    run_cargo_bench zero-copy | tee "$zero_copy_raw_output"
-    run_cargo_bench owned | tee "$owned_raw_output"
-
     rm -rf "$report_dir/criterion-html"
-    mkdir -p "$report_dir/criterion-html"
-    if [[ -d target/criterion ]]; then
-        cp -a target/criterion/. "$report_dir/criterion-html/"
-    fi
-
-    if [[ ! -f "$report_dir/guardrail.json" ]]; then
-        cat >"$report_dir/guardrail.json" <<JSON
-{"status":"unavailable","reason":"criterion-guardrail utility is not available in this standalone repository"}
-JSON
-    fi
-
-    write_summary "$report_dir" "$zero_copy_raw_output" "$owned_raw_output"
+    run_export_path zero-copy "$zero_copy_raw_output" "$zero_copy_criterion_dir"
+    run_export_path owned "$owned_raw_output" "$owned_criterion_dir"
+    write_guard_comparison "$report_dir" "$zero_copy_raw_output" "$guard_comparison"
+    write_summary "$report_dir" "$zero_copy_raw_output" "$owned_raw_output" "$zero_copy_criterion_dir" "$owned_criterion_dir" "$guard_comparison"
 }
 
 if [[ $# -lt 1 ]]; then
