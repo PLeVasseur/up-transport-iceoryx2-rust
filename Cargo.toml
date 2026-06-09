@@ -32,7 +32,7 @@ name = "transport_criterion"
 harness = false
 
 [dependencies]
-up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "3467db44c427b0a7bd793ce65eeadaef205ca88d", default-features = false }
+up-rust = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "0ad33e8a8508dd7c189780e0ac51095ece8995aa", default-features = false }
 async-trait = "0.1"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
 iceoryx2 = "0.9.1"

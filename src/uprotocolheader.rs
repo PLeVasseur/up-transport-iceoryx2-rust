@@ -12,22 +12,40 @@
 // ################################################################################
 
 use iceoryx2::prelude::ZeroCopySend;
-use iceoryx2_bb_container::vector::{StaticVec, Vector};
 use std::{borrow::Cow, fmt, ops::Range};
 use up_rust::{
-    PayloadEncoding, ProtobufMappable, UAttributes, UCode, UFrameMetadata, UPayloadFormat, UStatus,
+    PayloadEncoding, UAttributes, UCode, UFrameMetadata, UMessageType, UPayloadFormat, UPriority,
+    UStatus, UUID, UUri,
 };
 
-pub const MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH: usize = 1000;
 pub(crate) const FRAME_METADATA_MAGIC: [u8; 4] = *b"UFM1";
-const FRAME_METADATA_WITHOUT_ENCODING: [u8; 5] = *b"UFM1\0";
 
 /// Also see [uAttributes Mapping to iceoryx2 user header](https://github.com/eclipse-uprotocol/up-spec/blob/0cc43c8afb7d7cbd3169ffe093be761c57308cef/up-l1/iceoryx2.adoc#411-uattributes-mapping-to-iceoryx2-user-header)
 #[repr(C)]
 #[derive(ZeroCopySend, Debug, Default)]
 pub struct UProtocolHeader {
     pub(crate) uprotocol_major_version: u8,
-    pub(crate) uattributes_serialized: StaticVec<u8, MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH>,
+    pub(crate) id: [u8; 16],
+    pub(crate) message_type: u8,
+    pub(crate) priority_present: u8,
+    pub(crate) priority: u8,
+    pub(crate) ttl_present: u8,
+    pub(crate) ttl: u32,
+    pub(crate) request_id_present: u8,
+    pub(crate) request_id: [u8; 16],
+    pub(crate) permission_level_present: u8,
+    pub(crate) permission_level: u32,
+    pub(crate) commstatus_present: u8,
+    pub(crate) commstatus: i32,
+    pub(crate) payload_format_present: u8,
+    pub(crate) payload_format: i32,
+    pub(crate) source_ue_id: u32,
+    pub(crate) source_ue_version_major: u8,
+    pub(crate) source_resource_id: u16,
+    pub(crate) sink_present: u8,
+    pub(crate) sink_ue_id: u32,
+    pub(crate) sink_ue_version_major: u8,
+    pub(crate) sink_resource_id: u16,
     pub(crate) metadata_len: u64,
     pub(crate) payload_offset: u64,
     pub(crate) payload_len: u64,
@@ -36,16 +54,78 @@ pub struct UProtocolHeader {
 
 impl UProtocolHeader {
     pub(crate) fn write_attributes(&mut self, attributes: &UAttributes) -> Result<(), UStatus> {
-        let serialized_uattributes = attributes
-            .write_to_protobuf_bytes()
-            .map_err(|e| UStatus::fail_with_code(UCode::Internal, e.to_string()))?;
-        self.uattributes_serialized = StaticVec::try_from(serialized_uattributes.as_slice())
-            .map_err(|error| {
-                UStatus::fail_with_code(
-                    UCode::InvalidArgument,
-                    format!("serialized uAttributes exceed iceoryx2 user header capacity: {error}"),
-                )
-            })?;
+        write_uuid(&mut self.id, attributes.id());
+        self.message_type = message_type_to_byte(attributes.type_());
+
+        if let Some(priority) = attributes.priority() {
+            self.priority_present = 1;
+            self.priority = priority_to_byte(priority);
+        } else {
+            self.priority_present = 0;
+            self.priority = 0;
+        }
+
+        if let Some(ttl) = attributes.ttl() {
+            self.ttl_present = 1;
+            self.ttl = ttl;
+        } else {
+            self.ttl_present = 0;
+            self.ttl = 0;
+        }
+
+        if let Some(request_id) = attributes.request_id() {
+            self.request_id_present = 1;
+            write_uuid(&mut self.request_id, request_id);
+        } else {
+            self.request_id_present = 0;
+            self.request_id = [0; 16];
+        }
+
+        if let Some(permission_level) = attributes.permission_level() {
+            self.permission_level_present = 1;
+            self.permission_level = permission_level;
+        } else {
+            self.permission_level_present = 0;
+            self.permission_level = 0;
+        }
+
+        if let Some(commstatus) = attributes.commstatus() {
+            self.commstatus_present = 1;
+            self.commstatus = commstatus.value();
+        } else {
+            self.commstatus_present = 0;
+            self.commstatus = 0;
+        }
+
+        if let Some(payload_format) = attributes.payload_format() {
+            self.payload_format_present = 1;
+            self.payload_format = payload_format.as_i32();
+        } else {
+            self.payload_format_present = 0;
+            self.payload_format = 0;
+        }
+
+        write_uri_fields(
+            attributes.source(),
+            &mut self.source_ue_id,
+            &mut self.source_ue_version_major,
+            &mut self.source_resource_id,
+        );
+        if let Some(sink) = attributes.sink() {
+            self.sink_present = 1;
+            write_uri_fields(
+                sink,
+                &mut self.sink_ue_id,
+                &mut self.sink_ue_version_major,
+                &mut self.sink_resource_id,
+            );
+        } else {
+            self.sink_present = 0;
+            self.sink_ue_id = 0;
+            self.sink_ue_version_major = 0;
+            self.sink_resource_id = 0;
+        }
+
         Ok(())
     }
 
@@ -127,23 +207,75 @@ impl UProtocolHeader {
         let metadata_prefix = layout
             .metadata_prefix(sample_payload)
             .map_err(|error| UStatus::fail_with_code(UCode::InvalidArgument, error.to_string()))?;
-        let payload_encoding = decode_frame_metadata(metadata_prefix)?;
-        if payload_encoding.is_none() && layout.payload_len() != 0 {
+        let decoded_metadata = decode_frame_metadata(metadata_prefix)?;
+        if decoded_metadata.payload_encoding.is_none() && layout.payload_len() != 0 {
             return Err(UStatus::fail_with_code(
                 UCode::InvalidArgument,
                 "sample payload is present but payload encoding is absent",
             ));
         }
 
-        let attributes =
-            UAttributes::parse_from_protobuf_bytes(self.uattributes_serialized.as_slice())
-                .map_err(|error| {
-                    UStatus::fail_with_code(
-                        UCode::InvalidArgument,
-                        format!("failed to decode uAttributes from iceoryx2 user header: {error}"),
-                    )
+        let id = read_uuid(&self.id)?;
+        let source = read_uri_fields(
+            decoded_metadata.source_authority,
+            self.source_ue_id,
+            self.source_ue_version_major,
+            self.source_resource_id,
+        )?;
+        let sink = if self.sink_present == 0 {
+            if decoded_metadata.sink_authority.is_some() {
+                return Err(UStatus::fail_with_code(
+                    UCode::InvalidArgument,
+                    "sink authority metadata present without sink fields",
+                ));
+            }
+            None
+        } else {
+            let sink_authority = decoded_metadata.sink_authority.ok_or_else(|| {
+                UStatus::fail_with_code(UCode::InvalidArgument, "sink authority metadata missing")
+            })?;
+            Some(read_uri_fields(
+                sink_authority,
+                self.sink_ue_id,
+                self.sink_ue_version_major,
+                self.sink_resource_id,
+            )?)
+        };
+        let mut attributes =
+            UAttributes::new_unchecked(id, source, sink, byte_to_message_type(self.message_type)?);
+        if self.priority_present != 0 {
+            attributes.set_priority(byte_to_priority(self.priority)?);
+        }
+        if self.ttl_present != 0 {
+            attributes.set_ttl(self.ttl);
+        }
+        if self.request_id_present != 0 {
+            attributes.set_request_id(read_uuid(&self.request_id)?);
+        }
+        if self.permission_level_present != 0 {
+            attributes.set_permission_level(self.permission_level);
+        }
+        if self.commstatus_present != 0 {
+            let commstatus = UCode::from_i32(self.commstatus).ok_or_else(|| {
+                UStatus::fail_with_code(UCode::InvalidArgument, "invalid commstatus")
+            })?;
+            attributes.set_comm_status(commstatus);
+        }
+        if self.payload_format_present != 0 {
+            let payload_format =
+                UPayloadFormat::from_i32(self.payload_format).ok_or_else(|| {
+                    UStatus::fail_with_code(UCode::InvalidArgument, "invalid payload format")
                 })?;
-        UFrameMetadata::new(attributes, payload_encoding).map_err(|error| {
+            attributes.set_payload_format(payload_format);
+        }
+        if let Some(traceparent) = decoded_metadata.traceparent {
+            attributes.set_traceparent(traceparent);
+        }
+        if let Some(token) = decoded_metadata.token {
+            attributes.set_token(token);
+        }
+
+        UFrameMetadata::new(attributes, decoded_metadata.payload_encoding).map_err(|error| {
             UStatus::fail_with_code(
                 UCode::InvalidArgument,
                 format!("invalid frame metadata from iceoryx2 sample: {error}"),
@@ -275,14 +407,16 @@ impl Iceoryx2PayloadLayout {
 pub(crate) fn encode_frame_metadata(
     header: &UFrameMetadata,
 ) -> Result<Cow<'static, [u8]>, UStatus> {
-    let payload_encoding = header.payload_encoding();
-    if payload_encoding.is_none() {
-        return Ok(Cow::Borrowed(&FRAME_METADATA_WITHOUT_ENCODING));
-    }
-
     let mut bytes = Vec::new();
     bytes.extend_from_slice(&FRAME_METADATA_MAGIC);
-    write_optional_encoding(&mut bytes, payload_encoding)?;
+    write_string(&mut bytes, header.attributes().source().authority_name())?;
+    write_optional_string(
+        &mut bytes,
+        header.attributes().sink().map(UUri::authority_name),
+    )?;
+    write_optional_encoding(&mut bytes, header.payload_encoding())?;
+    write_optional_string(&mut bytes, header.attributes().traceparent())?;
+    write_optional_string(&mut bytes, header.attributes().token())?;
     Ok(Cow::Owned(bytes))
 }
 
@@ -296,20 +430,38 @@ pub(crate) fn validate_metadata_prefix(metadata: &[u8]) -> Result<(), FrameContr
     Ok(())
 }
 
-fn decode_frame_metadata(metadata: &[u8]) -> Result<Option<PayloadEncoding>, UStatus> {
+struct DecodedFrameMetadata {
+    source_authority: String,
+    sink_authority: Option<String>,
+    payload_encoding: Option<PayloadEncoding>,
+    traceparent: Option<String>,
+    token: Option<String>,
+}
+
+fn decode_frame_metadata(metadata: &[u8]) -> Result<DecodedFrameMetadata, UStatus> {
     validate_metadata_prefix(metadata)
         .map_err(|error| UStatus::fail_with_code(UCode::InvalidArgument, error.to_string()))?;
     let mut src = metadata
         .get(FRAME_METADATA_MAGIC.len()..)
         .ok_or_else(|| UStatus::fail_with_code(UCode::InvalidArgument, "invalid metadata"))?;
-    let encoding = read_optional_encoding(&mut src)?;
+    let source_authority = read_string(&mut src)?;
+    let sink_authority = read_optional_string(&mut src)?;
+    let payload_encoding = read_optional_encoding(&mut src)?;
+    let traceparent = read_optional_string(&mut src)?;
+    let token = read_optional_string(&mut src)?;
     if !src.is_empty() {
         return Err(UStatus::fail_with_code(
             UCode::InvalidArgument,
             "trailing frame metadata bytes",
         ));
     }
-    Ok(encoding)
+    Ok(DecodedFrameMetadata {
+        source_authority,
+        sink_authority,
+        payload_encoding,
+        traceparent,
+        token,
+    })
 }
 
 fn write_optional_encoding(
@@ -339,6 +491,17 @@ fn write_string(dst: &mut Vec<u8>, value: &str) -> Result<(), UStatus> {
     })?;
     dst.extend_from_slice(&len.to_le_bytes());
     dst.extend_from_slice(value.as_bytes());
+    Ok(())
+}
+
+fn write_optional_string(dst: &mut Vec<u8>, value: Option<&str>) -> Result<(), UStatus> {
+    match value {
+        Some(value) => {
+            dst.push(1);
+            write_string(dst, value)?;
+        }
+        None => dst.push(0),
+    }
     Ok(())
 }
 
@@ -389,6 +552,93 @@ fn read_string(src: &mut &[u8]) -> Result<String, UStatus> {
             format!("metadata field is not valid UTF-8: {error}"),
         )
     })
+}
+
+fn read_optional_string(src: &mut &[u8]) -> Result<Option<String>, UStatus> {
+    match read_u8(src)? {
+        0 => Ok(None),
+        1 => Ok(Some(read_string(src)?)),
+        _ => Err(UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            "invalid optional metadata field",
+        )),
+    }
+}
+
+fn write_uuid(dst: &mut [u8; 16], uuid: &UUID) {
+    let bytes = Vec::<u8>::from(uuid);
+    dst.copy_from_slice(&bytes);
+}
+
+fn read_uuid(bytes: &[u8; 16]) -> Result<UUID, UStatus> {
+    UUID::from_bytes(bytes)
+        .map_err(|error| UStatus::fail_with_code(UCode::InvalidArgument, error.to_string()))
+}
+
+fn write_uri_fields(uri: &UUri, ue_id: &mut u32, ue_version_major: &mut u8, resource_id: &mut u16) {
+    *ue_id = (u32::from(uri.uentity_instance_id()) << 16) | u32::from(uri.uentity_type_id());
+    *ue_version_major = uri.uentity_major_version();
+    *resource_id = uri.resource_id();
+}
+
+fn read_uri_fields(
+    authority_name: String,
+    ue_id: u32,
+    ue_version_major: u8,
+    resource_id: u16,
+) -> Result<UUri, UStatus> {
+    UUri::try_from_parts(&authority_name, ue_id, ue_version_major, resource_id)
+        .map_err(|error| UStatus::fail_with_code(UCode::InvalidArgument, error.to_string()))
+}
+
+fn message_type_to_byte(message_type: UMessageType) -> u8 {
+    match message_type {
+        UMessageType::Publish => 1,
+        UMessageType::Notification => 2,
+        UMessageType::Request => 3,
+        UMessageType::Response => 4,
+    }
+}
+
+fn byte_to_message_type(value: u8) -> Result<UMessageType, UStatus> {
+    match value {
+        1 => Ok(UMessageType::Publish),
+        2 => Ok(UMessageType::Notification),
+        3 => Ok(UMessageType::Request),
+        4 => Ok(UMessageType::Response),
+        _ => Err(UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            "invalid message type",
+        )),
+    }
+}
+
+fn priority_to_byte(priority: UPriority) -> u8 {
+    match priority {
+        UPriority::CS0 => 0,
+        UPriority::CS1 => 1,
+        UPriority::CS2 => 2,
+        UPriority::CS3 => 3,
+        UPriority::CS4 => 4,
+        UPriority::CS5 => 5,
+        UPriority::CS6 => 6,
+    }
+}
+
+fn byte_to_priority(value: u8) -> Result<UPriority, UStatus> {
+    match value {
+        0 => Ok(UPriority::CS0),
+        1 => Ok(UPriority::CS1),
+        2 => Ok(UPriority::CS2),
+        3 => Ok(UPriority::CS3),
+        4 => Ok(UPriority::CS4),
+        5 => Ok(UPriority::CS5),
+        6 => Ok(UPriority::CS6),
+        _ => Err(UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            "invalid priority",
+        )),
+    }
 }
 
 fn read_i32(src: &mut &[u8]) -> Result<i32, UStatus> {
