@@ -3,7 +3,17 @@ name = "up-transport-iceoryx2-rust"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default = []
+wire-proof-owned = ["up-rust/owned-frame-transport"]
+
 [dependencies]
-up-rust = "0.5"
+up-rust = { path = "../up-rust", default-features = false }
 iceoryx2 = "0.6.1"
 async-trait = "0.1"
+tokio = { version = "1.47.1", features = ["sync"] }
+
+[dev-dependencies]
+bytes = "1.10.1"
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "sync"] }
+up-wire-xcdrv2 = { path = "../up-wire-xcdrv2-rust" }
