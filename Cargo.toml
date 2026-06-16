@@ -5,13 +5,14 @@ edition = "2024"
 
 [features]
 default = []
-wire-proof-owned = ["up-rust/owned-frame-transport"]
 
 [dependencies]
 up-rust = { git = "ssh://git@github.com/PLeVasseur/up-rust.git", rev = "26d70ef45af61fdd17d3e130845a5be155154b2e", default-features = false }
-iceoryx2 = "0.6.1"
+iceoryx2 = "0.9.1"
+iceoryx2-bb-container = "0.9.1"
 async-trait = "0.1"
-tokio = { version = "1.47.1", features = ["sync"] }
+hostname = "0.4.1"
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "sync", "time"] }
 
 [dev-dependencies]
 bytes = "1.10.1"

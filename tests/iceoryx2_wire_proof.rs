@@ -1,34 +1,84 @@
-use std::{sync::Arc, sync::Mutex as StdMutex};
+// ################################################################################
+// Copyright (c) 2026 Contributors to the Eclipse Foundation
+//
+// SPDX-License-Identifier: Apache-2.0
+// ################################################################################
+
+use std::{sync::Arc, sync::Mutex as StdMutex, time::Duration};
 
 use async_trait::async_trait;
+use tokio::sync::{Mutex as TokioMutex, MutexGuard};
 use up_rust::{
-    PayloadEncoding, PayloadFormat, ProtobufWire, StableContainerWireFormat, UCode, UFrameMetadata,
-    UFrameView, UMessageBuilder, UPayloadFormat, UTxBuffer, UTxLoanSpec, UUri, UWireMetadata,
-    UWireMetadataError, UWithWire, UZeroCopyListener, UZeroCopyTransport,
+    NATIVE_PREFIX_METADATA_LAYOUT_ID, PROTOBUF_PAYLOAD_FAMILY_ID, PayloadEncoding, PayloadFormat,
+    ProtobufWire, StableContainerWireFormat, UCode, UFrameMetadata, UFrameView, UMessageBuilder,
+    UPayloadFormat, UStatus, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UWire, UWireMetadata,
+    UWireRx, UWithWire, UZeroCopyListener, UZeroCopyTransport, UZeroCopyUninitTransport,
+    WireIdentity, XCDR_V2_WIRE_ID,
 };
-use up_transport_iceoryx2_rust::{
-    Iceoryx2EncodedRxFrame, Iceoryx2WireCore, UPROTOCOL_MAJOR_VERSION, UProtocolHeader,
-};
+use up_transport_iceoryx2_rust::{Iceoryx2PubSub, Iceoryx2RxLease};
 use up_wire_xcdrv2::{VEHICLE_SIGNAL_V1_GOLDEN_BYTES, XCDR_V2_ENCODING_ID, XcdrV2Wire};
 
-fn topic() -> UUri {
-    UUri::try_from_parts("vehicle", 0x4210, 0x01, 0x9000).expect("topic URI")
+static ICEORYX2_TEST_MUTEX: TokioMutex<()> = TokioMutex::const_new(());
+
+async fn iceoryx2_test_guard() -> MutexGuard<'static, ()> {
+    ICEORYX2_TEST_MUTEX.lock().await
 }
 
-fn metadata(payload_encoding: PayloadEncoding) -> UFrameMetadata {
-    let message = UMessageBuilder::publish(topic()).build().expect("message");
+fn topic(test_name: &str) -> UUri {
+    let authority = format!("iox-usr09i-{test_name}-{}", std::process::id());
+    UUri::try_from_parts(&authority, 0x4210, 0x01, 0x9000).expect("topic URI")
+}
+
+fn metadata(topic: UUri, payload_encoding: PayloadEncoding) -> UFrameMetadata {
+    let message = UMessageBuilder::publish(topic).build().expect("message");
     UFrameMetadata::new(message.attributes().clone(), Some(payload_encoding)).expect("metadata")
 }
 
-fn source_filter() -> UUri {
-    topic()
+fn metadata_no_payload(topic: UUri) -> UFrameMetadata {
+    let message = UMessageBuilder::publish(topic).build().expect("message");
+    UFrameMetadata::new(message.attributes().clone(), None).expect("metadata")
 }
 
-#[tokio::test]
+async fn prime_subscriber<W>(transport: &up_rust::UWireTransport<Iceoryx2PubSub, W>, source: &UUri)
+where
+    W: UWireMetadata + Send + Sync + 'static,
+{
+    match transport.receive_zero_copy(source, None).await {
+        Ok(_) => panic!("subscriber unexpectedly received before send"),
+        Err(error) => assert_eq!(error.get_code(), UCode::NotFound),
+    }
+}
+
+async fn receive_with_retry<T, F>(mut f: F) -> Result<T, UStatus>
+where
+    F: AsyncFnMut() -> Result<T, UStatus>,
+{
+    let mut last = None;
+    for _ in 0..50 {
+        match f().await {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                if error.get_code() != UCode::NotFound {
+                    return Err(error);
+                }
+                last = Some(error);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+    Err(last.expect("receive attempted at least once"))
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn prepared_metadata_passes_through_for_required_wires() {
-    assert_prepared_metadata::<ProtobufWire>(PayloadEncoding::Standard(UPayloadFormat::Protobuf))
-        .await;
+    let _guard = iceoryx2_test_guard().await;
+    assert_prepared_metadata::<ProtobufWire>(
+        "protobuf-prepared",
+        PayloadEncoding::Standard(UPayloadFormat::Protobuf),
+    )
+    .await;
     assert_prepared_metadata::<StableContainerWireFormat>(
+        "stable-prepared",
         PayloadEncoding::custom(
             "up.stable-container-test",
             "application/vnd.uprotocol.stable-container-test",
@@ -36,40 +86,40 @@ async fn prepared_metadata_passes_through_for_required_wires() {
         .expect("stable encoding"),
     )
     .await;
-    assert_prepared_metadata::<XcdrV2Wire>(XcdrV2Wire::encoding()).await;
+    assert_prepared_metadata::<XcdrV2Wire>("xcdr-prepared", XcdrV2Wire::encoding()).await;
 }
 
-async fn assert_prepared_metadata<W>(payload_encoding: PayloadEncoding)
+async fn assert_prepared_metadata<W>(test_name: &str, payload_encoding: PayloadEncoding)
 where
     W: UWireMetadata + Default + Send + Sync + 'static,
 {
-    let core = Iceoryx2WireCore::new();
-    let transport = core.clone().with_wire(W::default());
-    let frame_metadata = metadata(payload_encoding);
+    let core = Iceoryx2PubSub::new();
+    let transport = core.with_wire(W::default());
+    let frame_metadata = metadata(topic(test_name), payload_encoding);
     let mut tx = transport
         .loan_tx(UTxLoanSpec::payload(frame_metadata.clone(), 4, 1).expect("loan spec"))
         .await
         .expect("loan");
     tx.payload_mut().copy_from_slice(b"data");
 
-    let prepared = core.last_prepared().await.expect("prepared request");
-    assert_eq!(prepared.metadata(), &frame_metadata);
-    assert_eq!(prepared.encoded_metadata(), tx.encoded_metadata());
     assert_eq!(
         tx.header().metadata_len as usize,
         tx.encoded_metadata().len()
     );
-
-    let decoded = W::decode_frame_metadata(prepared.encoded_metadata()).expect("decode");
+    assert_eq!(tx.header().payload_len, 4);
+    let decoded = W::decode_frame_metadata(tx.encoded_metadata()).expect("decode");
     assert_eq!(decoded, frame_metadata);
 }
 
-#[tokio::test]
-async fn external_xcdrv2_bytes_round_trip_through_pull_receive() {
-    let core = Iceoryx2WireCore::new();
-    let transport = core.clone().with_wire(XcdrV2Wire);
-    let frame_metadata = metadata(XcdrV2Wire::encoding());
-    let mut tx = transport
+#[tokio::test(flavor = "multi_thread")]
+async fn external_xcdrv2_bytes_round_trip_through_real_pull_receive() {
+    let _guard = iceoryx2_test_guard().await;
+    let publisher = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
+    let subscriber = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
+    let source = topic("xcdr-round-trip");
+    prime_subscriber(&subscriber, &source).await;
+    let frame_metadata = metadata(source.clone(), XcdrV2Wire::encoding());
+    let mut tx = publisher
         .loan_tx(
             UTxLoanSpec::payload(frame_metadata, VEHICLE_SIGNAL_V1_GOLDEN_BYTES.len(), 1)
                 .expect("loan spec"),
@@ -78,10 +128,9 @@ async fn external_xcdrv2_bytes_round_trip_through_pull_receive() {
         .expect("loan");
     tx.payload_mut()
         .copy_from_slice(&VEHICLE_SIGNAL_V1_GOLDEN_BYTES);
-    transport.send_zero_copy(tx).await.expect("send");
+    publisher.send_zero_copy(tx).await.expect("send");
 
-    let rx = transport
-        .receive_zero_copy(&source_filter(), None)
+    let rx = receive_with_retry(|| async { subscriber.receive_zero_copy(&source, None).await })
         .await
         .expect("receive");
     assert_eq!(
@@ -97,77 +146,155 @@ async fn external_xcdrv2_bytes_round_trip_through_pull_receive() {
     assert_eq!(encoding_id, XCDR_V2_ENCODING_ID);
 }
 
-#[tokio::test]
-async fn wrong_wire_and_payload_family_are_rejected_before_public_receive() {
-    let core = Iceoryx2WireCore::new();
-    let wrong_wire_metadata = ProtobufWire::encode_frame_metadata(&metadata(
-        PayloadEncoding::Standard(UPayloadFormat::Protobuf),
-    ))
-    .expect("wrong wire metadata");
-    let frame = Iceoryx2EncodedRxFrame::new(
-        UProtocolHeader {
-            uprotocol_major_version: UPROTOCOL_MAJOR_VERSION,
-            metadata_len: wrong_wire_metadata.len() as u64,
-            payload_len: 0,
-            payload_alignment: 1,
-        },
-        wrong_wire_metadata,
-        Vec::new(),
-    )
-    .expect("frame");
-    core.push_encoded_rx(frame).await;
-    let transport = core.with_wire(XcdrV2Wire);
+#[tokio::test(flavor = "multi_thread")]
+async fn wrong_wire_is_rejected_before_public_receive() {
+    let _guard = iceoryx2_test_guard().await;
+    let source = topic("wrong-wire");
+    let publisher = Iceoryx2PubSub::new().with_wire(ProtobufWire);
+    let subscriber = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
+    prime_subscriber(&subscriber, &source).await;
+    let frame_metadata = metadata_no_payload(source.clone());
+    let tx = publisher
+        .loan_tx(UTxLoanSpec::no_payload(frame_metadata).expect("loan spec"))
+        .await
+        .expect("loan");
+    publisher.send_zero_copy(tx).await.expect("send");
 
-    let result = transport.receive_zero_copy(&source_filter(), None).await;
-    let error = result.err().expect("wrong metadata rejected");
+    let error =
+        match receive_with_retry(|| async { subscriber.receive_zero_copy(&source, None).await })
+            .await
+        {
+            Ok(_) => panic!("wrong selected wire unexpectedly received"),
+            Err(error) => error,
+        };
     assert_eq!(error.get_code(), UCode::InvalidArgument);
 }
 
-#[tokio::test]
-async fn physical_mirror_mismatch_rejected_before_wire_decode() {
-    let encoded =
-        XcdrV2Wire::encode_frame_metadata(&metadata(XcdrV2Wire::encoding())).expect("metadata");
-    let frame = Iceoryx2EncodedRxFrame::new(
-        UProtocolHeader {
-            uprotocol_major_version: UPROTOCOL_MAJOR_VERSION,
-            metadata_len: encoded.len() as u64 + 1,
-            payload_len: 0,
-            payload_alignment: 1,
-        },
-        encoded,
-        Vec::new(),
-    );
-    assert!(frame.is_err());
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct XcdrWireWrongPayloadFamily;
+
+impl UWire for XcdrWireWrongPayloadFamily {
+    const WIRE_ID: WireIdentity = XCDR_V2_WIRE_ID;
+    const PAYLOAD_FAMILY_ID: WireIdentity = PROTOBUF_PAYLOAD_FAMILY_ID;
+    const METADATA_LAYOUT_ID: WireIdentity = NATIVE_PREFIX_METADATA_LAYOUT_ID;
+    const FORMAT_VERSION: u16 = XcdrV2Wire::FORMAT_VERSION;
 }
 
-#[tokio::test]
-async fn malformed_listener_metadata_is_not_delivered() {
-    let core = Iceoryx2WireCore::new();
+#[tokio::test(flavor = "multi_thread")]
+async fn payload_family_mismatch_is_distinct_from_wrong_wire() {
+    let _guard = iceoryx2_test_guard().await;
+    let source = topic("payload-family-mismatch");
+    let publisher = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
+    let subscriber = Iceoryx2PubSub::new().with_wire(XcdrWireWrongPayloadFamily);
+    prime_subscriber(&subscriber, &source).await;
+    let frame_metadata = metadata_no_payload(source.clone());
+    let tx = publisher
+        .loan_tx(UTxLoanSpec::no_payload(frame_metadata).expect("loan spec"))
+        .await
+        .expect("loan");
+    publisher.send_zero_copy(tx).await.expect("send");
+
+    let error =
+        match receive_with_retry(|| async { subscriber.receive_zero_copy(&source, None).await })
+            .await
+        {
+            Ok(_) => panic!("payload-family mismatch unexpectedly received"),
+            Err(error) => error,
+        };
+    assert_eq!(error.get_code(), UCode::InvalidArgument);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn uninit_tx_loan_commits_initialized_payload() {
+    let _guard = iceoryx2_test_guard().await;
+    let publisher = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
+    let subscriber = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
+    let source = topic("uninit-tx");
+    prime_subscriber(&subscriber, &source).await;
+    let frame_metadata = metadata(source.clone(), XcdrV2Wire::encoding());
+    let mut tx = publisher
+        .loan_uninit_tx(UTxLoanSpec::payload(frame_metadata, 8, 8).expect("loan spec"))
+        .await
+        .expect("loan");
+    for (slot, value) in tx.payload_uninit_mut().iter_mut().zip(0u8..8) {
+        slot.write(value);
+    }
+    // SAFETY: all visible payload bytes are initialized immediately above.
+    let tx = unsafe { tx.assume_payload_init() };
+    publisher.send_zero_copy(tx).await.expect("send");
+
+    let rx = receive_with_retry(|| async { subscriber.receive_zero_copy(&source, None).await })
+        .await
+        .expect("receive");
+    assert_eq!(
+        rx.try_contiguous_payload(),
+        Some([0, 1, 2, 3, 4, 5, 6, 7].as_slice())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn no_payload_round_trip_preserves_absence() {
+    let _guard = iceoryx2_test_guard().await;
+    let publisher = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
+    let subscriber = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
+    let source = topic("no-payload");
+    prime_subscriber(&subscriber, &source).await;
+    let frame_metadata = metadata_no_payload(source.clone());
+    let tx = publisher
+        .loan_tx(UTxLoanSpec::no_payload(frame_metadata).expect("loan spec"))
+        .await
+        .expect("loan");
+    publisher.send_zero_copy(tx).await.expect("send");
+
+    let rx = receive_with_retry(|| async { subscriber.receive_zero_copy(&source, None).await })
+        .await
+        .expect("receive");
+    assert!(!rx.has_payload());
+    assert_eq!(rx.payload_len(), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn listener_receives_and_unregister_stops_delivery() {
+    let _guard = iceoryx2_test_guard().await;
+    let source = topic("listener-unregister");
+    let publisher = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
+    let listener_transport = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
     let listener = Arc::new(CountingListener::default());
-    let transport = core.clone().with_wire(XcdrV2Wire);
-    transport
-        .register_zero_copy_listener(&source_filter(), None, listener.clone())
+    listener_transport
+        .register_zero_copy_listener(&source, None, listener.clone())
         .await
         .expect("register");
 
-    let wrong_wire_metadata = ProtobufWire::encode_frame_metadata(&metadata(
-        PayloadEncoding::Standard(UPayloadFormat::Protobuf),
-    ))
-    .expect("wrong wire metadata");
-    let frame = Iceoryx2EncodedRxFrame::new(
-        UProtocolHeader {
-            uprotocol_major_version: UPROTOCOL_MAJOR_VERSION,
-            metadata_len: wrong_wire_metadata.len() as u64,
-            payload_len: 4,
-            payload_alignment: 1,
-        },
-        wrong_wire_metadata,
-        b"drop".to_vec(),
-    )
-    .expect("frame");
-    core.deliver_encoded_rx(frame).await;
+    send_payload(&publisher, source.clone(), &[9, 8, 7]).await;
+    for _ in 0..50 {
+        if listener.payloads() == vec![vec![9, 8, 7]] {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert_eq!(listener.payloads(), vec![vec![9, 8, 7]]);
 
-    assert_eq!(listener.payloads(), Vec::<Vec<u8>>::new());
+    listener_transport
+        .unregister_zero_copy_listener(&source, None, listener.clone())
+        .await
+        .expect("unregister");
+    send_payload(&publisher, source, &[1, 2, 3]).await;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(listener.payloads(), vec![vec![9, 8, 7]]);
+}
+
+async fn send_payload(
+    publisher: &up_rust::UWireTransport<Iceoryx2PubSub, XcdrV2Wire>,
+    source: UUri,
+    payload: &[u8],
+) {
+    let frame_metadata = metadata(source, XcdrV2Wire::encoding());
+    let mut tx = publisher
+        .loan_tx(UTxLoanSpec::payload(frame_metadata, payload.len(), 1).expect("loan spec"))
+        .await
+        .expect("loan");
+    tx.payload_mut().copy_from_slice(payload);
+    publisher.send_zero_copy(tx).await.expect("send");
 }
 
 #[derive(Default)]
@@ -182,20 +309,11 @@ impl CountingListener {
 }
 
 #[async_trait]
-impl<W> UZeroCopyListener<up_rust::UWireRx<Iceoryx2EncodedRxFrame, W>> for CountingListener
-where
-    W: UWireMetadata + Send + Sync + 'static,
-{
-    async fn on_receive_zero_copy(&self, frame: up_rust::UWireRx<Iceoryx2EncodedRxFrame, W>) {
+impl UZeroCopyListener<UWireRx<Iceoryx2RxLease, XcdrV2Wire>> for CountingListener {
+    async fn on_receive_zero_copy(&self, frame: UWireRx<Iceoryx2RxLease, XcdrV2Wire>) {
         self.payloads
             .lock()
             .expect("payload lock")
             .push(frame.try_contiguous_payload().unwrap_or_default().to_vec());
     }
-}
-
-#[test]
-fn wire_metadata_errors_are_owned_by_up_rust() {
-    let error = XcdrV2Wire::decode_frame_metadata(b"not metadata").expect_err("malformed");
-    assert!(matches!(error, UWireMetadataError::WrongMagic));
 }
