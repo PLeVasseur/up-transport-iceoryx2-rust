@@ -137,16 +137,16 @@ Zero-copy:
 TRANSPORT_BENCH_SUITE=$TRANSPORT_BENCH_SUITE TRANSPORT_BENCH_PROFILE=$TRANSPORT_BENCH_PROFILE CARGO_BIN="$CARGO_BIN" scripts/bench_transport_criterion.sh export
 \`\`\`
 
-Owned comparison blocker artifact:
+Owned loopback:
 
 \`\`\`bash
-cat $owned_raw_output
+TRANSPORT_BENCH_SUITE=$TRANSPORT_BENCH_SUITE TRANSPORT_BENCH_PROFILE=$TRANSPORT_BENCH_PROFILE TRANSPORT_BENCH_PATH=owned CARGO_BIN="$CARGO_BIN" scripts/bench_transport_criterion.sh export
 \`\`\`
 
 ## Environment
 
 - Transport: iceoryx2
-- Phase: USR-10B2
+- Phase: USR-10B2X
 - Git head: \`$(git_value rev-parse HEAD)\`
 - Git branch: \`$(git_value branch --show-current)\`
 - Default Rust: \`$(rustc --version)\`
@@ -168,12 +168,12 @@ cat $owned_raw_output
 ## Required Labels
 
 - \`stable_zc_nozero_full\`
-- \`protobuf_owned_full\` blocked/support-only for USR-10B2
-- \`stable_owned_bytes_full\` blocked/support-only for USR-10B2
+- \`protobuf_owned_full\`
+- \`stable_owned_bytes_full\`
 
 ## Claim Boundary
 
-This script is the USR-10B2 authority wrapper for representative command shape and artifact separation. Owned comparison rows are blocked/support-only because the current feature-gated owned core records prepared bytes and does not provide comparable loopback receive semantics.
+This script is the USR-10B2X authority wrapper for representative command shape and artifact separation. Owned comparison rows use the benchmark-only iceoryx2 owned-loopback core backed by real Iceoryx2PubSub mechanics.
 SUMMARY
 }
 
@@ -188,15 +188,9 @@ export_results() {
     mkdir -p "$bench_data_dir"
     rm -rf "$report_dir/criterion-html"
     run_export_path zero-copy "$zero_copy_raw_output" "$zero_copy_criterion_dir"
-    rm -rf "$owned_criterion_dir"
-    mkdir -p "$owned_criterion_dir"
-    cat >"$owned_raw_output" <<'OWNED_BLOCKED'
-status: blocked/support-only
-phase: USR-10B2
-reason: Iceoryx2OwnedCore is a feature-gated prepared-frame/logging proof core; send_owned records prepared bytes and receive_owned returns only explicitly injected frames, so owned comparison rows are not comparable loopback benchmark authority in this phase.
-OWNED_BLOCKED
+    run_export_path owned "$owned_raw_output" "$owned_criterion_dir"
     cat >"$report_dir/guardrail.json" <<JSON
-{"status":"blocked","phase":"USR-10B2","reason":"aggregate guard comparison is not established by this script alone"}
+{"status":"blocked","phase":"USR-10B2X","reason":"aggregate guard comparison is not established by this script alone"}
 JSON
     write_summary "$report_dir" "$zero_copy_raw_output" "$owned_raw_output" "$zero_copy_criterion_dir" "$owned_criterion_dir"
 }
@@ -229,7 +223,7 @@ case "$subcommand" in
         fi
         mkdir -p "$(dirname "$2")"
         cat >"$2" <<JSON
-{"status":"blocked","phase":"USR-10B2","candidate":"$1","reason":"aggregate guard comparison is not established by this script alone"}
+{"status":"blocked","phase":"USR-10B2X","candidate":"$1","reason":"aggregate guard comparison is not established by this script alone"}
 JSON
         ;;
     export)

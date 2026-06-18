@@ -20,7 +20,7 @@ use std::{
     collections::{HashMap, VecDeque},
     io::Cursor,
     mem::MaybeUninit,
-    sync::Arc,
+    sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
 };
 use tokio::sync::{Mutex, RwLock};
 use up_rust::{
@@ -44,6 +44,9 @@ type IpcPublisher = Publisher<ipc_threadsafe::Service, [u8], UProtocolHeader>;
 type IpcSubscriber = Subscriber<ipc_threadsafe::Service, [u8], UProtocolHeader>;
 type PublisherSet = RwLock<HashMap<ServiceName, Arc<IpcPublisher>>>;
 type SubscriberSet = RwLock<HashMap<ServiceName, Arc<IpcSubscriber>>>;
+type BroadReceiverRegistry = StdMutex<Vec<Weak<Iceoryx2PubSubInner>>>;
+
+static BROAD_RECEIVER_REGISTRY: OnceLock<BroadReceiverRegistry> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct Iceoryx2PubSub {
@@ -61,6 +64,7 @@ pub(crate) struct Iceoryx2PubSubInner {
     config: Iceoryx2PubSubConfig,
     publishers: PublisherSet,
     pull_subscribers: SubscriberSet,
+    pending_pull_source_filters: RwLock<Vec<UUri>>,
     pull_receive_queue_state: Mutex<PullReceiveQueueState>,
     zero_copy_listeners: RwLock<Vec<ZeroCopyListenerRegistration>>,
 }
@@ -133,6 +137,7 @@ impl Iceoryx2PubSub {
             config,
             publishers: RwLock::new(HashMap::new()),
             pull_subscribers: RwLock::new(HashMap::new()),
+            pending_pull_source_filters: RwLock::new(Vec::new()),
             pull_receive_queue_state: Mutex::new(PullReceiveQueueState::default()),
             zero_copy_listeners: RwLock::new(Vec::new()),
         });
@@ -262,6 +267,42 @@ impl Iceoryx2PubSubInner {
             .await
             .insert(service_name, subscriber.clone());
         Ok(subscriber)
+    }
+
+    async fn register_pending_pull_source_filter(&self, source_filter: &UUri) {
+        let mut source_filters = self.pending_pull_source_filters.write().await;
+        if !source_filters.iter().any(|filter| filter == source_filter) {
+            source_filters.push(source_filter.clone());
+        }
+    }
+
+    async fn ensure_subscribers_for_source(
+        &self,
+        service_name: &ServiceName,
+        source: &UUri,
+    ) -> Result<(), UStatus> {
+        let pending_pull_source_filters = self.pending_pull_source_filters.read().await.clone();
+        if pending_pull_source_filters
+            .iter()
+            .any(|filter| filter.matches(source))
+        {
+            self.get_or_create_pull_subscriber(*service_name, None)
+                .await?;
+        }
+
+        let mut registrations = self.zero_copy_listeners.write().await;
+        for registration in registrations.iter_mut() {
+            if !registration.source_filter.matches(source)
+                || registration.subscribers.contains_key(service_name)
+            {
+                continue;
+            }
+            let subscriber = self.create_subscriber(*service_name, None)?;
+            registration
+                .subscribers
+                .insert(*service_name, Arc::new(subscriber));
+        }
+        Ok(())
     }
 
     fn discover_service_names(&self) -> Result<Vec<String>, UStatus> {
@@ -443,6 +484,45 @@ impl Iceoryx2PubSubInner {
         }
         Ok(())
     }
+}
+
+fn broad_receiver_registry() -> &'static BroadReceiverRegistry {
+    BROAD_RECEIVER_REGISTRY.get_or_init(|| StdMutex::new(Vec::new()))
+}
+
+fn register_broad_receiver(inner: &Arc<Iceoryx2PubSubInner>) {
+    let weak_inner = Arc::downgrade(inner);
+    let mut receivers = broad_receiver_registry()
+        .lock()
+        .expect("broad receiver registry lock poisoned");
+    receivers.retain(|receiver| receiver.upgrade().is_some());
+    if !receivers
+        .iter()
+        .any(|receiver| receiver.ptr_eq(&weak_inner))
+    {
+        receivers.push(weak_inner);
+    }
+}
+
+async fn notify_broad_receivers(service_name: &ServiceName, source: &UUri) -> Result<(), UStatus> {
+    let receivers = {
+        let mut receivers = broad_receiver_registry()
+            .lock()
+            .expect("broad receiver registry lock poisoned");
+        let live_receivers = receivers
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        receivers.retain(|receiver| receiver.upgrade().is_some());
+        live_receivers
+    };
+
+    for receiver in receivers {
+        receiver
+            .ensure_subscribers_for_source(service_name, source)
+            .await?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -674,6 +754,7 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
             .inner
             .get_or_create_publisher(service_name, source)
             .await?;
+        notify_broad_receivers(&service_name, source).await?;
         let sample_len =
             worst_case_aligned_sample_len(encoded_metadata.len(), payload_len, alignment)?;
         let mut sample = publisher
@@ -722,34 +803,67 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
     ) -> Result<Self::Rx, UStatus> {
-        let service_name = compute_service_name(
-            source_filter,
-            sink_filter,
-            MessagingPattern::PublishSubscribe,
-        )?;
-        let subscriber = self
-            .inner
-            .get_or_create_pull_subscriber(service_name, Some(source_filter))
-            .await?;
-        if let Some(lease) = self
-            .inner
-            .pop_queued_pull_sample(&service_name, sink_filter)
-            .await
-        {
-            return Ok(lease);
-        }
-        loop {
-            let sample = subscriber
+        let exact_source_filter = source_filter.verify_no_wildcards().is_ok();
+        let service_names = if exact_source_filter {
+            vec![compute_service_name(
+                source_filter,
+                sink_filter,
+                MessagingPattern::PublishSubscribe,
+            )?]
+        } else {
+            self.inner
+                .register_pending_pull_source_filter(source_filter)
+                .await;
+            register_broad_receiver(&self.inner);
+            self.inner
+                .discover_matching_service_names(source_filter)?
+                .into_iter()
+                .map(|service_name| {
+                    ServiceName::new(service_name.as_str()).map_err(|error| {
+                        UStatus::fail_with_code(
+                            UCode::Internal,
+                            format!(
+                                "discovered invalid iceoryx2 service name {service_name}: {error}"
+                            ),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        for service_name in service_names {
+            if let Some(lease) = self
+                .inner
+                .pop_queued_pull_sample(&service_name, sink_filter)
+                .await
+            {
+                return Ok(lease);
+            }
+
+            let subscriber = self
+                .inner
+                .get_or_create_pull_subscriber(
+                    service_name,
+                    exact_source_filter.then_some(source_filter),
+                )
+                .await?;
+            while let Some(sample) = subscriber
                 .receive()
                 .map_err(|error| UStatus::fail_with_code(UCode::Internal, error.to_string()))?
-                .ok_or_else(|| UStatus::fail_with_code(UCode::NotFound, "no sample available"))?;
-            let lease = lease_from_sample(sample, source_filter.clone(), sink_filter.cloned())?;
-            if !sink_matches(lease.sink_filter_hint(), sink_filter) {
-                self.inner.queue_pull_sample(service_name, lease).await?;
-                continue;
+            {
+                let lease = lease_from_sample(sample, source_filter.clone(), sink_filter.cloned())?;
+                if !sink_matches(lease.sink_filter_hint(), sink_filter) {
+                    self.inner.queue_pull_sample(service_name, lease).await?;
+                    continue;
+                }
+                return Ok(lease);
             }
-            return Ok(lease);
         }
+
+        Err(UStatus::fail_with_code(
+            UCode::NotFound,
+            "no sample available",
+        ))
     }
 
     async fn register_encoded_zero_copy_listener(
@@ -758,6 +872,7 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UEncodedZeroCopyListener<Self::Rx>>,
     ) -> Result<(), UStatus> {
+        let exact_source_filter = source_filter.verify_no_wildcards().is_ok();
         let mut listeners = self.inner.zero_copy_listeners.write().await;
         if listeners.iter().any(|registration| {
             registration.has_same_identity(source_filter, sink_filter, &listener)
@@ -769,7 +884,7 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
         }
         let mut registration =
             ZeroCopyListenerRegistration::new(source_filter, sink_filter, listener);
-        if source_filter.verify_no_wildcards().is_ok() {
+        if exact_source_filter {
             let service_name = compute_service_name(
                 source_filter,
                 sink_filter,
@@ -781,6 +896,8 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
             registration
                 .subscribers
                 .insert(service_name, Arc::new(subscriber));
+        } else {
+            register_broad_receiver(&self.inner);
         }
         listeners.push(registration);
         Ok(())
@@ -826,6 +943,7 @@ impl UZeroCopyUninitTransportCore for Iceoryx2PubSub {
             .inner
             .get_or_create_publisher(service_name, source)
             .await?;
+        notify_broad_receivers(&service_name, source).await?;
         let sample_len =
             worst_case_aligned_sample_len(encoded_metadata.len(), payload_len, alignment)?;
         let mut sample = publisher

@@ -22,7 +22,7 @@ pub(crate) mod workers;
 
 pub use iceoryx2::prelude::MessagingPattern;
 #[cfg(feature = "benchmark-owned")]
-pub use owned::{Iceoryx2EncodedOwnedFrameLog, Iceoryx2OwnedCore};
+pub use owned::{BenchmarkOwnedIceoryx2Core, Iceoryx2EncodedOwnedFrameLog, Iceoryx2OwnedCore};
 pub use uprotocolheader::{Iceoryx2PayloadLayout, UProtocolHeader};
 pub use utransport_pubsub::{
     Iceoryx2PubSub, Iceoryx2PubSubConfig, Iceoryx2PullMismatchQueueFullPolicy, Iceoryx2RxLease,

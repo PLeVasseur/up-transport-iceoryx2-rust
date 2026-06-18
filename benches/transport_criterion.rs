@@ -20,7 +20,7 @@ use up_rust::{
 #[cfg(feature = "benchmark-owned")]
 use up_rust::{ProtobufPayload, UOwnedFrame, UOwnedTransport};
 #[cfg(feature = "benchmark-owned")]
-use up_transport_iceoryx2_rust::Iceoryx2OwnedCore;
+use up_transport_iceoryx2_rust::BenchmarkOwnedIceoryx2Core;
 use up_transport_iceoryx2_rust::{Iceoryx2PubSub, Iceoryx2PubSubConfig};
 
 const BENCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -162,18 +162,19 @@ struct PayloadContractAck {
 struct BenchTransports {
     zero_copy: Arc<up_rust::UWireTransport<Iceoryx2PubSub, StableContainerWireFormat>>,
     #[cfg(feature = "benchmark-owned")]
-    owned: Arc<up_rust::UWireTransport<Iceoryx2OwnedCore, StableContainerWireFormat>>,
+    owned: Arc<up_rust::UWireTransport<BenchmarkOwnedIceoryx2Core, StableContainerWireFormat>>,
 }
 
 impl BenchTransports {
     fn build(max_slice_len: usize) -> Self {
         let config = Iceoryx2PubSubConfig::static_allocation(max_slice_len)
             .with_pull_mismatch_queue_capacity(4_096);
-        let zero_copy =
-            Arc::new(Iceoryx2PubSub::with_config(config).with_wire(StableContainerWireFormat));
+        let core = Iceoryx2PubSub::with_config(config);
+        let zero_copy = Arc::new(core.clone().with_wire(StableContainerWireFormat));
         #[cfg(feature = "benchmark-owned")]
-        let owned =
-            Arc::new(Iceoryx2OwnedCore::new().with_selected_wire(StableContainerWireFormat));
+        let owned = Arc::new(
+            BenchmarkOwnedIceoryx2Core::new(core).with_selected_wire(StableContainerWireFormat),
+        );
         Self {
             zero_copy,
             #[cfg(feature = "benchmark-owned")]

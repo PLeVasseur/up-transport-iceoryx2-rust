@@ -89,9 +89,9 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 
 [[package]]
 name = "bytes"
-version = "1.11.1"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
+checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 
 [[package]]
 name = "cast"
@@ -1510,7 +1510,7 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 [[package]]
 name = "up-rust"
 version = "0.10.0-SNAPSHOT"
-source = "git+ssh://git@github.com/PLeVasseur/up-rust.git?rev=815fbeb170f85e3bb33e98c63cfc4a2667dfb1f9#815fbeb170f85e3bb33e98c63cfc4a2667dfb1f9"
+source = "git+ssh://git@github.com/PLeVasseur/up-rust.git?rev=75d8c108d2884957a9863579f408b9437c2b5392#75d8c108d2884957a9863579f408b9437c2b5392"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1532,7 +1532,7 @@ dependencies = [
 [[package]]
 name = "up-rust-macros"
 version = "0.10.0-SNAPSHOT"
-source = "git+ssh://git@github.com/PLeVasseur/up-rust.git?rev=815fbeb170f85e3bb33e98c63cfc4a2667dfb1f9#815fbeb170f85e3bb33e98c63cfc4a2667dfb1f9"
+source = "git+ssh://git@github.com/PLeVasseur/up-rust.git?rev=75d8c108d2884957a9863579f408b9437c2b5392#75d8c108d2884957a9863579f408b9437c2b5392"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1559,7 +1559,7 @@ dependencies = [
 [[package]]
 name = "up-wire-xcdrv2"
 version = "0.0.0"
-source = "git+ssh://git@github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=d35b43df4951a8eca09313a20bf24a3d79400f72#d35b43df4951a8eca09313a20bf24a3d79400f72"
+source = "git+ssh://git@github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=17a4f9f969ba601566fffa89849c2f9c7c01f3a3#17a4f9f969ba601566fffa89849c2f9c7c01f3a3"
 dependencies = [
  "up-rust",
 ]
@@ -1688,7 +1688,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
