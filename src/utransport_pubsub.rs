@@ -14,6 +14,7 @@ use iceoryx2::{
     node::{Node, NodeBuilder},
     port::{publisher::Publisher, subscriber::Subscriber},
     prelude::ServiceName,
+    service::builder::publish_subscribe::PublishSubscribeOpenError,
     service::ipc_threadsafe,
 };
 use std::{
@@ -199,6 +200,12 @@ impl Iceoryx2PubSubInner {
                 })?
         } else {
             builder.open().map_err(|error| {
+                if matches!(error, PublishSubscribeOpenError::DoesNotExist) {
+                    return UStatus::fail_with_code(
+                        UCode::NotFound,
+                        format!("iceoryx2 service does not exist: {service_name}"),
+                    );
+                }
                 UStatus::fail_with_code(
                     UCode::Internal,
                     format!("failed to open iceoryx2 service: {error}"),

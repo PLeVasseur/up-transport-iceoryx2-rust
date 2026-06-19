@@ -15,7 +15,10 @@ use tokio::runtime::Runtime;
 #[cfg(feature = "payload-contract-benchmarks")]
 use up_rust::bench_fixtures::payload_contract::{self, *};
 #[cfg(feature = "benchmark-owned")]
-use up_rust::{EncodedOwnedFrame, ProtobufPayload, UOwnedFrame, UOwnedTransport, UWireMetadata};
+use up_rust::{
+    EncodedOwnedFrame, PreparedOwnedFrame, ProtobufPayload, UEncodedOwnedListener, UOwnedFrame,
+    UOwnedTransport, UOwnedTransportCore, UStatus, UWireMetadata,
+};
 use up_rust::{
     PayloadEncoding, StableContainerWireFormat, UCode, UFrameMetadata,
     ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUID, UUri, UWithWire,
@@ -201,6 +204,46 @@ impl PayloadContractPathMode {
 struct PrebuiltOwnedPayload {
     encoding: PayloadEncoding,
     bytes: Vec<u8>,
+}
+
+#[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
+#[derive(Clone, Copy, Default)]
+struct DiagnosticTxSinkCore;
+
+#[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
+#[async_trait::async_trait]
+impl UOwnedTransportCore for DiagnosticTxSinkCore {
+    async fn send_prepared_owned(&self, frame: PreparedOwnedFrame) -> Result<(), UStatus> {
+        black_box(frame.encoded_metadata().len());
+        black_box(frame.payload().map_or(0, Bytes::len));
+        Ok(())
+    }
+
+    async fn receive_encoded_owned(
+        &self,
+        _source_filter: &UUri,
+        _sink_filter: Option<&UUri>,
+    ) -> Result<EncodedOwnedFrame, UStatus> {
+        unreachable!("diagnostic TX sink does not support receive")
+    }
+
+    async fn register_encoded_owned_listener(
+        &self,
+        _source_filter: &UUri,
+        _sink_filter: Option<&UUri>,
+        _listener: Arc<dyn UEncodedOwnedListener>,
+    ) -> Result<(), UStatus> {
+        unreachable!("diagnostic TX sink does not support listeners")
+    }
+
+    async fn unregister_encoded_owned_listener(
+        &self,
+        _source_filter: &UUri,
+        _sink_filter: Option<&UUri>,
+        _listener: Arc<dyn UEncodedOwnedListener>,
+    ) -> Result<(), UStatus> {
+        unreachable!("diagnostic TX sink does not support listeners")
+    }
 }
 
 #[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
@@ -468,7 +511,8 @@ fn bench_payload_contract_owned_adapter_diagnostic_matrix(
             };
             let case = BenchCase::new(contract.name());
             let core = Iceoryx2OwnedCore::new();
-            let transport = core.clone().with_selected_wire(StableContainerWireFormat);
+            let rx_transport = core.clone().with_selected_wire(StableContainerWireFormat);
+            let tx_transport = DiagnosticTxSinkCore.with_wire(StableContainerWireFormat);
             let encoded_metadata = StableContainerWireFormat::encode_frame_metadata(
                 &case.metadata(next_uuid(), Some(prebuilt.encoding.clone())),
             )
@@ -507,7 +551,7 @@ fn bench_payload_contract_owned_adapter_diagnostic_matrix(
                                 let frame =
                                     UOwnedFrame::with_payload(metadata, prebuilt.bytes.clone())
                                         .expect("valid diagnostic owned TX frame");
-                                transport
+                                tx_transport
                                     .send_owned(frame)
                                     .await
                                     .expect("diagnostic owned TX should succeed");
@@ -522,7 +566,7 @@ fn bench_payload_contract_owned_adapter_diagnostic_matrix(
                                     Some(Bytes::copy_from_slice(&prebuilt.bytes)),
                                 ))
                                 .await;
-                                let frame = transport
+                                let frame = rx_transport
                                     .receive_owned(&case.source, None)
                                     .await
                                     .expect("diagnostic owned RX should succeed");
