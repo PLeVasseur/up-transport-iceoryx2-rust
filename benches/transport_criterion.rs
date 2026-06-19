@@ -8,19 +8,21 @@
 
 use std::{sync::Arc, time::Duration, time::SystemTime};
 
+#[cfg(feature = "benchmark-owned")]
+use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use tokio::runtime::Runtime;
 #[cfg(feature = "payload-contract-benchmarks")]
 use up_rust::bench_fixtures::payload_contract::{self, *};
+#[cfg(feature = "benchmark-owned")]
+use up_rust::{EncodedOwnedFrame, ProtobufPayload, UOwnedFrame, UOwnedTransport, UWireMetadata};
 use up_rust::{
     PayloadEncoding, StableContainerWireFormat, UCode, UFrameMetadata,
     ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUID, UUri, UWithWire,
     UZeroCopyTransport, UZeroCopyUninitTransportExt,
 };
 #[cfg(feature = "benchmark-owned")]
-use up_rust::{ProtobufPayload, UOwnedFrame, UOwnedTransport};
-#[cfg(feature = "benchmark-owned")]
-use up_transport_iceoryx2_rust::BenchmarkOwnedIceoryx2Core;
+use up_transport_iceoryx2_rust::{BenchmarkOwnedIceoryx2Core, Iceoryx2OwnedCore};
 use up_transport_iceoryx2_rust::{Iceoryx2PubSub, Iceoryx2PubSubConfig};
 
 const BENCH_TIMEOUT: Duration = Duration::from_secs(5);
@@ -53,6 +55,73 @@ enum BenchProfile {
     Core,
     Camera,
     All,
+}
+
+#[derive(Clone, Copy)]
+enum BenchDiagnostic {
+    Authority,
+    PrebuiltPayload,
+    MetadataOnly,
+    TxOnly,
+    RxOnly,
+    CopyLedger,
+}
+
+impl BenchDiagnostic {
+    fn from_env() -> Self {
+        match std::env::var("TRANSPORT_BENCH_DIAGNOSTIC")
+            .unwrap_or_else(|_| "authority".to_string())
+            .as_str()
+        {
+            "authority" => Self::Authority,
+            "prebuilt-payload" => Self::PrebuiltPayload,
+            "metadata-only" => Self::MetadataOnly,
+            "tx-only" => Self::TxOnly,
+            "rx-only" => Self::RxOnly,
+            "copy-ledger" => Self::CopyLedger,
+            other => panic!(
+                "TRANSPORT_BENCH_DIAGNOSTIC must be one of authority, prebuilt-payload, metadata-only, tx-only, rx-only, copy-ledger; got {other}"
+            ),
+        }
+    }
+
+    fn uses_real_transports(self) -> bool {
+        matches!(self, Self::Authority | Self::PrebuiltPayload)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DiagnosticValidate {
+    None,
+    Sample,
+    Full,
+}
+
+impl DiagnosticValidate {
+    fn from_env() -> Self {
+        match std::env::var("TRANSPORT_BENCH_VALIDATE")
+            .unwrap_or_else(|_| "full".to_string())
+            .as_str()
+        {
+            "none" => Self::None,
+            "sample" => Self::Sample,
+            "full" => Self::Full,
+            other => {
+                panic!("TRANSPORT_BENCH_VALIDATE must be one of none, sample, full; got {other}")
+            }
+        }
+    }
+}
+
+fn copy_ledger_enabled() -> bool {
+    match std::env::var("TRANSPORT_BENCH_COPY_LEDGER")
+        .unwrap_or_else(|_| "0".to_string())
+        .as_str()
+    {
+        "0" => false,
+        "1" => true,
+        other => panic!("TRANSPORT_BENCH_COPY_LEDGER must be 0 or 1; got {other}"),
+    }
 }
 
 impl BenchProfile {
@@ -123,6 +192,39 @@ impl PayloadContractPathMode {
             other => {
                 panic!("TRANSPORT_BENCH_PATH must be one of all, owned, zero-copy; got {other}")
             }
+        }
+    }
+}
+
+#[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
+#[derive(Clone)]
+struct PrebuiltOwnedPayload {
+    encoding: PayloadEncoding,
+    bytes: Vec<u8>,
+}
+
+#[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
+impl PrebuiltOwnedPayload {
+    fn for_path(path: PayloadContractPath, contract: &PayloadContractCase) -> Option<Self> {
+        match path {
+            PayloadContractPath::ProtobufOwned => Some(Self {
+                encoding: ProtobufPayload::encoding(),
+                bytes: payload_contract::protobuf_encoded_bytes_for(
+                    contract,
+                    PAYLOAD_CONTRACT_SEQUENCE,
+                )
+                .expect("protobuf benchmark payload should serialize"),
+            }),
+            PayloadContractPath::StableOwnedBytes => {
+                let fixture =
+                    payload_contract::stable_owned_fixture_for(contract, PAYLOAD_CONTRACT_SEQUENCE)
+                        .expect("stable owned fixture should initialize");
+                Some(Self {
+                    encoding: fixture.encoding,
+                    bytes: fixture.bytes,
+                })
+            }
+            PayloadContractPath::StableZcNoZero => None,
         }
     }
 }
@@ -285,6 +387,198 @@ fn bench_payload_contract_matrix(
     group.finish();
 }
 
+#[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
+fn bench_payload_contract_prebuilt_payload_matrix(
+    c: &mut Criterion,
+    runtime: &Runtime,
+    transports: &BenchTransports,
+    group_name: &'static str,
+    payload_cases: &[PayloadContractCase],
+    timeout: Duration,
+    path_mode: PayloadContractPathMode,
+) {
+    let _validate = DiagnosticValidate::from_env();
+    let mut group = c.benchmark_group(group_name);
+    for contract in payload_cases {
+        for &path in payload_contract_paths(path_mode) {
+            let Some(prebuilt) = PrebuiltOwnedPayload::for_path(path, contract) else {
+                continue;
+            };
+            let case = BenchCase::new(contract.name());
+            runtime.block_on(prime_subscriber(transports, &case));
+            let transported_payload_len = prebuilt.bytes.len();
+            group.bench_function(
+                BenchmarkId::new(
+                    format!("{}_diagnostic_prebuilt_payload", path.label()),
+                    format!(
+                        "publish/{}/{}/{}",
+                        contract.name(),
+                        contract.semantic_reference_len(),
+                        transported_payload_len
+                    ),
+                ),
+                |b| {
+                    b.iter(|| {
+                        runtime.block_on(async {
+                            let id = next_uuid();
+                            send_prebuilt_owned_payload_contract_path(
+                                transports,
+                                path,
+                                &case,
+                                id.clone(),
+                                &prebuilt,
+                            )
+                            .await;
+                            let ack = receive_payload_contract_ack(
+                                transports,
+                                path,
+                                &case,
+                                &id,
+                                contract,
+                                transported_payload_len,
+                                timeout,
+                            )
+                            .await;
+                            black_box(ack.semantic_reference_len);
+                            black_box(ack.transported_payload_len);
+                        });
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+#[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
+fn bench_payload_contract_owned_adapter_diagnostic_matrix(
+    c: &mut Criterion,
+    runtime: &Runtime,
+    diagnostic: BenchDiagnostic,
+    group_name: &'static str,
+    payload_cases: &[PayloadContractCase],
+    path_mode: PayloadContractPathMode,
+) {
+    let _validate = DiagnosticValidate::from_env();
+    let mut group = c.benchmark_group(group_name);
+    for contract in payload_cases {
+        for &path in payload_contract_paths(path_mode) {
+            let Some(prebuilt) = PrebuiltOwnedPayload::for_path(path, contract) else {
+                continue;
+            };
+            let case = BenchCase::new(contract.name());
+            let core = Iceoryx2OwnedCore::new();
+            let transport = core.clone().with_selected_wire(StableContainerWireFormat);
+            let encoded_metadata = StableContainerWireFormat::encode_frame_metadata(
+                &case.metadata(next_uuid(), Some(prebuilt.encoding.clone())),
+            )
+            .expect("diagnostic metadata should encode");
+            let id_label = match diagnostic {
+                BenchDiagnostic::TxOnly => "diagnostic_tx_only",
+                BenchDiagnostic::RxOnly => "diagnostic_rx_only",
+                BenchDiagnostic::CopyLedger => "diagnostic_copy_ledger",
+                _ => unreachable!("unsupported owned adapter diagnostic"),
+            };
+            let estimated_copy_bytes = 2 * encoded_metadata.len() + 2 * prebuilt.bytes.len();
+            let parameter = if matches!(diagnostic, BenchDiagnostic::CopyLedger) {
+                format!(
+                    "copy-ledger/{}/{}/{}/{}",
+                    contract.name(),
+                    contract.semantic_reference_len(),
+                    prebuilt.bytes.len(),
+                    estimated_copy_bytes
+                )
+            } else {
+                format!(
+                    "publish/{}/{}/{}",
+                    contract.name(),
+                    contract.semantic_reference_len(),
+                    prebuilt.bytes.len()
+                )
+            };
+            group.bench_function(
+                BenchmarkId::new(format!("{}_{}", path.label(), id_label), parameter),
+                |b| match diagnostic {
+                    BenchDiagnostic::TxOnly => {
+                        b.iter(|| {
+                            runtime.block_on(async {
+                                let metadata =
+                                    case.metadata(next_uuid(), Some(prebuilt.encoding.clone()));
+                                let frame =
+                                    UOwnedFrame::with_payload(metadata, prebuilt.bytes.clone())
+                                        .expect("valid diagnostic owned TX frame");
+                                transport
+                                    .send_owned(frame)
+                                    .await
+                                    .expect("diagnostic owned TX should succeed");
+                            });
+                        });
+                    }
+                    BenchDiagnostic::RxOnly => {
+                        b.iter(|| {
+                            runtime.block_on(async {
+                                core.push_encoded_owned(EncodedOwnedFrame::new(
+                                    encoded_metadata.clone(),
+                                    Some(Bytes::copy_from_slice(&prebuilt.bytes)),
+                                ))
+                                .await;
+                                let frame = transport
+                                    .receive_owned(&case.source, None)
+                                    .await
+                                    .expect("diagnostic owned RX should succeed");
+                                black_box(frame.payload_bytes().len());
+                            });
+                        });
+                    }
+                    BenchDiagnostic::CopyLedger => {
+                        let enabled = copy_ledger_enabled();
+                        b.iter(|| {
+                            let estimated = if enabled { estimated_copy_bytes } else { 0 };
+                            black_box(estimated);
+                        });
+                    }
+                    _ => unreachable!("unsupported owned adapter diagnostic"),
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+fn bench_payload_contract_metadata_only_matrix(
+    c: &mut Criterion,
+    group_name: &'static str,
+    payload_cases: &[PayloadContractCase],
+) {
+    let _validate = DiagnosticValidate::from_env();
+    let mut group = c.benchmark_group(group_name);
+    for contract in payload_cases {
+        let case = BenchCase::new(contract.name());
+        let metadata = case.metadata(next_uuid(), None);
+        let encoded = StableContainerWireFormat::encode_frame_metadata(&metadata)
+            .expect("diagnostic metadata should encode");
+        group.bench_function(
+            BenchmarkId::new(
+                "stable_zc_nozero_full_diagnostic_metadata_only",
+                format!("metadata/{}/{}", contract.name(), encoded.len()),
+            ),
+            |b| {
+                b.iter(|| {
+                    let encoded =
+                        StableContainerWireFormat::encode_frame_metadata(black_box(&metadata))
+                            .expect("diagnostic metadata should encode");
+                    let decoded =
+                        StableContainerWireFormat::decode_frame_metadata(black_box(&encoded))
+                            .expect("diagnostic metadata should decode");
+                    black_box(decoded);
+                });
+            },
+        );
+    }
+    group.finish();
+}
+
 #[cfg(feature = "payload-contract-benchmarks")]
 async fn send_payload_contract_path(
     transports: &BenchTransports,
@@ -325,6 +619,31 @@ async fn send_payload_contract_path(
                 .send_owned(frame)
                 .await
                 .expect("iceoryx2 payload-contract stable owned bytes send should succeed");
+        }
+    }
+}
+
+#[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
+async fn send_prebuilt_owned_payload_contract_path(
+    transports: &BenchTransports,
+    path: PayloadContractPath,
+    case: &BenchCase,
+    id: UUID,
+    prebuilt: &PrebuiltOwnedPayload,
+) {
+    match path {
+        PayloadContractPath::ProtobufOwned | PayloadContractPath::StableOwnedBytes => {
+            let metadata = case.metadata(id, Some(prebuilt.encoding.clone()));
+            let frame = UOwnedFrame::with_payload(metadata, prebuilt.bytes.clone())
+                .expect("valid prebuilt owned benchmark frame");
+            transports
+                .owned
+                .send_owned(frame)
+                .await
+                .expect("iceoryx2 prebuilt owned send should succeed");
+        }
+        PayloadContractPath::StableZcNoZero => {
+            panic!("prebuilt-payload diagnostic is only defined for owned payload paths")
         }
     }
 }
@@ -643,19 +962,22 @@ fn payload_contract_transported_len(
 
 fn bench_transport(c: &mut Criterion) {
     let _suite = BenchSuite::from_env();
-    bench_payload_contract(c, BenchProfile::from_env());
+    bench_payload_contract(c, BenchProfile::from_env(), BenchDiagnostic::from_env());
 }
 
 #[cfg(feature = "payload-contract-benchmarks")]
-fn bench_payload_contract(c: &mut Criterion, profile: BenchProfile) {
+fn bench_payload_contract(c: &mut Criterion, profile: BenchProfile, diagnostic: BenchDiagnostic) {
     let runtime = Runtime::new().expect("tokio runtime");
     let path_mode = PayloadContractPathMode::from_env();
     if profile.includes_core() {
-        let transports = runtime.block_on(async { BenchTransports::build(CORE_STATIC_ALLOCATION) });
-        bench_payload_contract_matrix(
+        let transports = diagnostic
+            .uses_real_transports()
+            .then(|| runtime.block_on(async { BenchTransports::build(CORE_STATIC_ALLOCATION) }));
+        bench_payload_contract_for_diagnostic(
             c,
             &runtime,
-            &transports,
+            transports.as_ref(),
+            diagnostic,
             "transport_payload_contract_core",
             payload_contract::core_cases(),
             BENCH_TIMEOUT,
@@ -663,12 +985,14 @@ fn bench_payload_contract(c: &mut Criterion, profile: BenchProfile) {
         );
     }
     if profile.includes_camera() {
-        let transports =
-            runtime.block_on(async { BenchTransports::build(CAMERA_STATIC_ALLOCATION) });
-        bench_payload_contract_matrix(
+        let transports = diagnostic
+            .uses_real_transports()
+            .then(|| runtime.block_on(async { BenchTransports::build(CAMERA_STATIC_ALLOCATION) }));
+        bench_payload_contract_for_diagnostic(
             c,
             &runtime,
-            &transports,
+            transports.as_ref(),
+            diagnostic,
             "transport_payload_contract_large_sensor",
             payload_contract::large_sensor_cases(),
             LARGE_SENSOR_BENCH_TIMEOUT,
@@ -677,8 +1001,67 @@ fn bench_payload_contract(c: &mut Criterion, profile: BenchProfile) {
     }
 }
 
+#[cfg(feature = "payload-contract-benchmarks")]
+fn bench_payload_contract_for_diagnostic(
+    c: &mut Criterion,
+    runtime: &Runtime,
+    transports: Option<&BenchTransports>,
+    diagnostic: BenchDiagnostic,
+    group_name: &'static str,
+    payload_cases: &[PayloadContractCase],
+    timeout: Duration,
+    path_mode: PayloadContractPathMode,
+) {
+    match diagnostic {
+        BenchDiagnostic::Authority => bench_payload_contract_matrix(
+            c,
+            runtime,
+            transports.expect("authority diagnostics require real transports"),
+            group_name,
+            payload_cases,
+            timeout,
+            path_mode,
+        ),
+        #[cfg(feature = "benchmark-owned")]
+        BenchDiagnostic::PrebuiltPayload => bench_payload_contract_prebuilt_payload_matrix(
+            c,
+            runtime,
+            transports.expect("prebuilt-payload diagnostics require real transports"),
+            group_name,
+            payload_cases,
+            timeout,
+            path_mode,
+        ),
+        BenchDiagnostic::MetadataOnly => {
+            bench_payload_contract_metadata_only_matrix(c, group_name, payload_cases);
+        }
+        #[cfg(feature = "benchmark-owned")]
+        BenchDiagnostic::TxOnly | BenchDiagnostic::RxOnly | BenchDiagnostic::CopyLedger => {
+            bench_payload_contract_owned_adapter_diagnostic_matrix(
+                c,
+                runtime,
+                diagnostic,
+                group_name,
+                payload_cases,
+                path_mode,
+            );
+        }
+        #[cfg(not(feature = "benchmark-owned"))]
+        BenchDiagnostic::PrebuiltPayload
+        | BenchDiagnostic::TxOnly
+        | BenchDiagnostic::RxOnly
+        | BenchDiagnostic::CopyLedger => {
+            panic!("TRANSPORT_BENCH_DIAGNOSTIC mode requires feature benchmark-owned")
+        }
+    }
+}
+
 #[cfg(not(feature = "payload-contract-benchmarks"))]
-fn bench_payload_contract(_c: &mut Criterion, _profile: BenchProfile) {
+fn bench_payload_contract(
+    _c: &mut Criterion,
+    _profile: BenchProfile,
+    _diagnostic: BenchDiagnostic,
+) {
     panic!("TRANSPORT_BENCH_SUITE=payload-contract requires feature payload-contract-benchmarks");
 }
 
