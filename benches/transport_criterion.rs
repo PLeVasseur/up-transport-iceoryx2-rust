@@ -6,7 +6,7 @@
 
 #![allow(clippy::missing_panics_doc, clippy::too_many_lines)]
 
-use std::{sync::Arc, time::Duration, time::SystemTime};
+use std::{sync::Arc, time::Duration, time::Instant, time::SystemTime};
 
 #[cfg(feature = "benchmark-owned")]
 use bytes::Bytes;
@@ -20,7 +20,7 @@ use up_rust::{
     UOwnedTransport, UOwnedTransportCore, UStatus, UWireMetadata,
 };
 use up_rust::{
-    PayloadEncoding, StableContainerWireFormat, UCode, UFrameMetadata,
+    PayloadEncoding, StableContainerWireFormat, UCode, UFrameMetadata, UFrameView,
     ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUID, UUri, UWithWire,
     UZeroCopyTransport, UZeroCopyUninitTransportExt,
 };
@@ -68,6 +68,13 @@ enum BenchDiagnostic {
     TxOnly,
     RxOnly,
     CopyLedger,
+    ZcInitOnly,
+    ZcSendOnly,
+    ZcRxOnly,
+    ZcValidationOnly,
+    ZcFilterOnly,
+    ZcCopyLedger,
+    ZcLoanProvenanceCheck,
 }
 
 impl BenchDiagnostic {
@@ -82,14 +89,28 @@ impl BenchDiagnostic {
             "tx-only" => Self::TxOnly,
             "rx-only" => Self::RxOnly,
             "copy-ledger" => Self::CopyLedger,
+            "zc-init-only" => Self::ZcInitOnly,
+            "zc-send-only" => Self::ZcSendOnly,
+            "zc-rx-only" => Self::ZcRxOnly,
+            "zc-validation-only" => Self::ZcValidationOnly,
+            "zc-filter-only" => Self::ZcFilterOnly,
+            "zc-copy-ledger" => Self::ZcCopyLedger,
+            "zc-loan-provenance-check" => Self::ZcLoanProvenanceCheck,
             other => panic!(
-                "TRANSPORT_BENCH_DIAGNOSTIC must be one of authority, prebuilt-payload, metadata-only, tx-only, rx-only, copy-ledger; got {other}"
+                "TRANSPORT_BENCH_DIAGNOSTIC must be one of authority, prebuilt-payload, metadata-only, tx-only, rx-only, copy-ledger, zc-init-only, zc-send-only, zc-rx-only, zc-validation-only, zc-filter-only, zc-copy-ledger, zc-loan-provenance-check; got {other}"
             ),
         }
     }
 
     fn uses_real_transports(self) -> bool {
-        matches!(self, Self::Authority | Self::PrebuiltPayload)
+        matches!(
+            self,
+            Self::Authority
+                | Self::PrebuiltPayload
+                | Self::ZcSendOnly
+                | Self::ZcRxOnly
+                | Self::ZcLoanProvenanceCheck
+        )
     }
 }
 
@@ -152,7 +173,7 @@ impl BenchProfile {
 }
 
 #[cfg(feature = "payload-contract-benchmarks")]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum PayloadContractPath {
     #[cfg(feature = "benchmark-owned")]
     ProtobufOwned,
@@ -624,6 +645,196 @@ fn bench_payload_contract_metadata_only_matrix(
 }
 
 #[cfg(feature = "payload-contract-benchmarks")]
+fn bench_payload_contract_zero_copy_diagnostic_matrix(
+    c: &mut Criterion,
+    runtime: &Runtime,
+    transports: Option<&BenchTransports>,
+    diagnostic: BenchDiagnostic,
+    group_name: &'static str,
+    payload_cases: &[PayloadContractCase],
+    timeout: Duration,
+    path_mode: PayloadContractPathMode,
+) {
+    let _validate = DiagnosticValidate::from_env();
+    let mut group = c.benchmark_group(group_name);
+    for contract in payload_cases {
+        if !payload_contract_paths(path_mode).contains(&PayloadContractPath::StableZcNoZero) {
+            continue;
+        }
+        let case = BenchCase::new(contract.name());
+        let metadata = case.metadata(next_uuid(), None);
+        let encoded_metadata = StableContainerWireFormat::encode_frame_metadata(&metadata)
+            .expect("diagnostic zero-copy metadata should encode");
+        let payload_len = payload_contract::stable_payload_len(contract);
+        let parameter = format!(
+            "{}/{}/{}/{}",
+            zero_copy_diagnostic_parameter_prefix(diagnostic),
+            contract.name(),
+            contract.semantic_reference_len(),
+            payload_len
+        );
+        if let Some(transports) = transports {
+            runtime.block_on(prime_subscriber(transports, &case));
+        }
+        group.bench_function(
+            BenchmarkId::new(zero_copy_diagnostic_label(diagnostic), parameter),
+            |b| match diagnostic {
+                BenchDiagnostic::ZcInitOnly => {
+                    b.iter(|| {
+                        let fixture = payload_contract::stable_owned_fixture_for(
+                            black_box(contract),
+                            PAYLOAD_CONTRACT_SEQUENCE,
+                        )
+                        .expect("zero-copy init diagnostic fixture should initialize");
+                        black_box(fixture.stable_transport_len);
+                        black_box(fixture.stable_align);
+                    });
+                }
+                BenchDiagnostic::ZcSendOnly => {
+                    let transports = transports.expect("zc-send-only requires real transports");
+                    b.iter_custom(|iters| {
+                        runtime.block_on(async {
+                            let mut elapsed = Duration::ZERO;
+                            for _ in 0..iters {
+                                let id = next_uuid();
+                                let metadata = case.metadata(id.clone(), None);
+                                let start = Instant::now();
+                                send_stable_payload_contract(transports, metadata, contract).await;
+                                elapsed += start.elapsed();
+                                receive_zero_copy_no_validate(
+                                    transports,
+                                    &case,
+                                    &id,
+                                    payload_len,
+                                    timeout,
+                                )
+                                .await;
+                            }
+                            elapsed
+                        })
+                    });
+                }
+                BenchDiagnostic::ZcRxOnly => {
+                    let transports = transports.expect("zc-rx-only requires real transports");
+                    b.iter_custom(|iters| {
+                        runtime.block_on(async {
+                            let mut elapsed = Duration::ZERO;
+                            for _ in 0..iters {
+                                let id = next_uuid();
+                                let metadata = case.metadata(id.clone(), None);
+                                send_stable_payload_contract(transports, metadata, contract).await;
+                                let start = Instant::now();
+                                receive_zero_copy_no_validate(
+                                    transports,
+                                    &case,
+                                    &id,
+                                    payload_len,
+                                    timeout,
+                                )
+                                .await;
+                                elapsed += start.elapsed();
+                            }
+                            elapsed
+                        })
+                    });
+                }
+                BenchDiagnostic::ZcValidationOnly => {
+                    let fixture = payload_contract::stable_owned_fixture_for(
+                        contract,
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
+                    .expect("zero-copy validation diagnostic fixture should initialize");
+                    b.iter(|| {
+                        payload_contract::validate_stable_owned_bytes(
+                            black_box(contract),
+                            PAYLOAD_CONTRACT_SEQUENCE,
+                            Some(&fixture.encoding),
+                            black_box(&fixture.bytes),
+                        )
+                        .expect("zero-copy validation diagnostic fixture should validate");
+                    });
+                }
+                BenchDiagnostic::ZcFilterOnly => {
+                    b.iter(|| {
+                        let decoded = StableContainerWireFormat::decode_frame_metadata(black_box(
+                            &encoded_metadata,
+                        ))
+                        .expect("zero-copy filter diagnostic metadata should decode");
+                        let source_matches = case.source.matches(decoded.attributes().source());
+                        let sink_matches = decoded.attributes().sink().is_none();
+                        black_box(source_matches && sink_matches);
+                    });
+                }
+                BenchDiagnostic::ZcCopyLedger => {
+                    let enabled = copy_ledger_enabled();
+                    let estimated_metadata_copy_bytes = 2 * encoded_metadata.len();
+                    let estimated_payload_copy_bytes = 0usize;
+                    b.iter(|| {
+                        let estimated = if enabled {
+                            estimated_metadata_copy_bytes + estimated_payload_copy_bytes
+                        } else {
+                            0
+                        };
+                        black_box(estimated);
+                    });
+                }
+                BenchDiagnostic::ZcLoanProvenanceCheck => {
+                    let transports =
+                        transports.expect("zc-loan-provenance-check requires real transports");
+                    b.iter(|| {
+                        runtime.block_on(async {
+                            let id = next_uuid();
+                            let metadata = case.metadata(id.clone(), None);
+                            send_stable_payload_contract(transports, metadata, contract).await;
+                            let frame =
+                                receive_zero_copy_frame(transports, &case, &id, timeout).await;
+                            black_box(
+                                frame
+                                    .payload_loan_provenance()
+                                    .expect("zero-copy diagnostic frame should be loan-backed"),
+                            );
+                            black_box(frame.payload_len());
+                        });
+                    });
+                }
+                _ => unreachable!("unsupported zero-copy diagnostic"),
+            },
+        );
+    }
+    group.finish();
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+fn zero_copy_diagnostic_label(diagnostic: BenchDiagnostic) -> &'static str {
+    match diagnostic {
+        BenchDiagnostic::ZcInitOnly => "stable_zc_nozero_full_diagnostic_zc_init_only",
+        BenchDiagnostic::ZcSendOnly => "stable_zc_nozero_full_diagnostic_zc_send_only",
+        BenchDiagnostic::ZcRxOnly => "stable_zc_nozero_full_diagnostic_zc_rx_only",
+        BenchDiagnostic::ZcValidationOnly => "stable_zc_nozero_full_diagnostic_zc_validation_only",
+        BenchDiagnostic::ZcFilterOnly => "stable_zc_nozero_full_diagnostic_zc_filter_only",
+        BenchDiagnostic::ZcCopyLedger => "stable_zc_nozero_full_diagnostic_zc_copy_ledger",
+        BenchDiagnostic::ZcLoanProvenanceCheck => {
+            "stable_zc_nozero_full_diagnostic_zc_loan_provenance_check"
+        }
+        _ => unreachable!("unsupported zero-copy diagnostic"),
+    }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+fn zero_copy_diagnostic_parameter_prefix(diagnostic: BenchDiagnostic) -> &'static str {
+    match diagnostic {
+        BenchDiagnostic::ZcInitOnly => "zc-init",
+        BenchDiagnostic::ZcSendOnly => "zc-send",
+        BenchDiagnostic::ZcRxOnly => "zc-rx",
+        BenchDiagnostic::ZcValidationOnly => "zc-validation",
+        BenchDiagnostic::ZcFilterOnly => "zc-filter",
+        BenchDiagnostic::ZcCopyLedger => "zc-copy-ledger",
+        BenchDiagnostic::ZcLoanProvenanceCheck => "zc-loan-provenance",
+        _ => unreachable!("unsupported zero-copy diagnostic"),
+    }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
 async fn send_payload_contract_path(
     transports: &BenchTransports,
     path: PayloadContractPath,
@@ -845,6 +1056,57 @@ async fn receive_payload_contract_ack(
             Err(status) => panic!("unexpected iceoryx2 payload-contract receive error: {status:?}"),
         }
     }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+async fn receive_zero_copy_frame(
+    transports: &BenchTransports,
+    case: &BenchCase,
+    expected_id: &UUID,
+    timeout: Duration,
+) -> up_rust::UWireRx<up_transport_iceoryx2_rust::Iceoryx2RxLease, StableContainerWireFormat> {
+    let deadline = tokio::time::Instant::now() + timeout;
+    loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        assert!(
+            !remaining.is_zero(),
+            "timed out waiting for matching iceoryx2 zero-copy diagnostic frame"
+        );
+        let result = tokio::time::timeout(
+            remaining,
+            transports.zero_copy.receive_zero_copy(&case.source, None),
+        )
+        .await
+        .expect("timed out waiting for iceoryx2 zero-copy diagnostic receive");
+        match result {
+            Ok(frame) if frame.metadata().attributes().id() == expected_id => return frame,
+            Ok(_) => continue,
+            Err(status) if status.get_code() == UCode::NotFound => {
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            Err(status) => {
+                panic!("unexpected iceoryx2 zero-copy diagnostic receive error: {status:?}")
+            }
+        }
+    }
+}
+
+#[cfg(feature = "payload-contract-benchmarks")]
+async fn receive_zero_copy_no_validate(
+    transports: &BenchTransports,
+    case: &BenchCase,
+    expected_id: &UUID,
+    expected_payload_len: usize,
+    timeout: Duration,
+) {
+    let frame = receive_zero_copy_frame(transports, case, expected_id, timeout).await;
+    black_box(
+        frame
+            .payload_loan_provenance()
+            .expect("zero-copy diagnostic frame should be loan-backed"),
+    );
+    assert_eq!(frame.payload_len(), expected_payload_len);
+    black_box(frame.payload_len());
 }
 
 #[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
@@ -1087,6 +1349,24 @@ fn bench_payload_contract_for_diagnostic(
                 diagnostic,
                 group_name,
                 payload_cases,
+                path_mode,
+            );
+        }
+        BenchDiagnostic::ZcInitOnly
+        | BenchDiagnostic::ZcSendOnly
+        | BenchDiagnostic::ZcRxOnly
+        | BenchDiagnostic::ZcValidationOnly
+        | BenchDiagnostic::ZcFilterOnly
+        | BenchDiagnostic::ZcCopyLedger
+        | BenchDiagnostic::ZcLoanProvenanceCheck => {
+            bench_payload_contract_zero_copy_diagnostic_matrix(
+                c,
+                runtime,
+                transports,
+                diagnostic,
+                group_name,
+                payload_cases,
+                timeout,
                 path_mode,
             );
         }
