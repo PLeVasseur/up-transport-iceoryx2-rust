@@ -17,12 +17,12 @@ use up_rust::bench_fixtures::payload_contract::{self, *};
 #[cfg(feature = "benchmark-owned")]
 use up_rust::{
     EncodedOwnedFrame, PreparedOwnedFrame, ProtobufPayload, UEncodedOwnedListener, UOwnedFrame,
-    UOwnedTransport, UOwnedTransportCore, UStatus, UWireMetadata,
+    UOwnedTransport, UOwnedTransportCore, UStatus,
 };
 use up_rust::{
     PayloadEncoding, StableContainerWireFormat, UCode, UFrameMetadata, UFrameView,
-    ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUID, UUri, UWithWire,
-    UZeroCopyTransport, UZeroCopyUninitTransportExt,
+    ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUID, UUri, UWireMetadata,
+    UWithWire, UZeroCopyTransport, UZeroCopyUninitTransportExt,
 };
 #[cfg(feature = "benchmark-owned")]
 use up_transport_iceoryx2_rust::{BenchmarkOwnedIceoryx2Core, Iceoryx2OwnedCore};
