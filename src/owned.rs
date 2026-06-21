@@ -15,9 +15,9 @@ use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Mutex;
 use up_rust::{
-    EncodedOwnedFrame, PreparedOwnedFrame, PreparedTxLoanSpec, UCode, UEncodedOwnedListener,
-    UEncodedRxFrame, UEncodedZeroCopyListener, UOwnedTransportCore, UStatus, UTxBuffer, UUri,
-    UWire, UWireTransport, UWithWire, UZeroCopyTransportCore,
+    EncodedOwnedFrame, NativePrefixProtobufMetadataCodec, PreparedOwnedFrame, PreparedTxLoanSpec,
+    UCode, UEncodedOwnedListener, UEncodedRxFrame, UEncodedZeroCopyListener, UOwnedTransportCore,
+    UStatus, UTxBuffer, UUri, UWire, UWireTransport, UZeroCopyTransportCore,
 };
 
 use crate::{Iceoryx2PubSub, Iceoryx2RxLease};
@@ -51,11 +51,14 @@ impl BenchmarkOwnedIceoryx2Core {
 
     /// Wraps this core in the generic selected-wire adapter.
     #[must_use]
-    pub fn with_selected_wire<W>(self, wire: W) -> UWireTransport<Self, W>
+    pub fn with_selected_wire<W>(
+        self,
+        wire: W,
+    ) -> UWireTransport<Self, W, NativePrefixProtobufMetadataCodec>
     where
         W: UWire,
     {
-        self.with_wire(wire)
+        UWireTransport::new(self, wire, NativePrefixProtobufMetadataCodec)
     }
 
     /// Returns the wrapped real iceoryx2 core.
@@ -227,11 +230,14 @@ impl Iceoryx2OwnedCore {
 
     /// Wraps this core in the generic selected-wire adapter.
     #[must_use]
-    pub fn with_selected_wire<W>(self, wire: W) -> UWireTransport<Self, W>
+    pub fn with_selected_wire<W>(
+        self,
+        wire: W,
+    ) -> UWireTransport<Self, W, NativePrefixProtobufMetadataCodec>
     where
         W: UWire,
     {
-        self.with_wire(wire)
+        UWireTransport::new(self, wire, NativePrefixProtobufMetadataCodec)
     }
 
     /// Returns the last prepared owned frame observed by the core.

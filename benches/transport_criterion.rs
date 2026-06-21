@@ -20,9 +20,10 @@ use up_rust::{
     UOwnedTransport, UOwnedTransportCore, UStatus,
 };
 use up_rust::{
-    PayloadEncoding, StableContainerWireFormat, UCode, UFrameMetadata, UFrameView,
-    ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUID, UUri, UWireMetadata,
-    UWithWire, UZeroCopyTransport, UZeroCopyUninitTransportExt,
+    NativePrefixProtobufMetadataCodec, PayloadEncoding, StableContainerWireFormat, UCode,
+    UFrameMetadata, UFrameView, ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType,
+    UUID, UUri, UWire, UWireMetadataCodec, UWireTransport, UZeroCopyTransport,
+    UZeroCopyUninitTransportExt,
 };
 #[cfg(feature = "benchmark-owned")]
 use up_transport_iceoryx2_rust::{BenchmarkOwnedIceoryx2Core, Iceoryx2OwnedCore};
@@ -326,9 +327,21 @@ struct PayloadContractAck {
 }
 
 struct BenchTransports {
-    zero_copy: Arc<up_rust::UWireTransport<Iceoryx2PubSub, StableContainerWireFormat>>,
+    zero_copy: Arc<
+        UWireTransport<
+            Iceoryx2PubSub,
+            StableContainerWireFormat,
+            NativePrefixProtobufMetadataCodec,
+        >,
+    >,
     #[cfg(feature = "benchmark-owned")]
-    owned: Arc<up_rust::UWireTransport<BenchmarkOwnedIceoryx2Core, StableContainerWireFormat>>,
+    owned: Arc<
+        UWireTransport<
+            BenchmarkOwnedIceoryx2Core,
+            StableContainerWireFormat,
+            NativePrefixProtobufMetadataCodec,
+        >,
+    >,
 }
 
 impl BenchTransports {
@@ -336,7 +349,11 @@ impl BenchTransports {
         let config = Iceoryx2PubSubConfig::static_allocation(max_slice_len)
             .with_pull_mismatch_queue_capacity(4_096);
         let core = Iceoryx2PubSub::with_config(config);
-        let zero_copy = Arc::new(core.clone().with_wire(StableContainerWireFormat));
+        let zero_copy = Arc::new(UWireTransport::new(
+            core.clone(),
+            StableContainerWireFormat,
+            NativePrefixProtobufMetadataCodec,
+        ));
         #[cfg(feature = "benchmark-owned")]
         let owned = Arc::new(
             BenchmarkOwnedIceoryx2Core::new(core).with_selected_wire(StableContainerWireFormat),
@@ -533,11 +550,17 @@ fn bench_payload_contract_owned_adapter_diagnostic_matrix(
             let case = BenchCase::new(contract.name());
             let core = Iceoryx2OwnedCore::new();
             let rx_transport = core.clone().with_selected_wire(StableContainerWireFormat);
-            let tx_transport = DiagnosticTxSinkCore.with_wire(StableContainerWireFormat);
-            let encoded_metadata = StableContainerWireFormat::encode_frame_metadata(
-                &case.metadata(next_uuid(), Some(prebuilt.encoding.clone())),
-            )
-            .expect("diagnostic metadata should encode");
+            let tx_transport = UWireTransport::new(
+                DiagnosticTxSinkCore,
+                StableContainerWireFormat,
+                NativePrefixProtobufMetadataCodec,
+            );
+            let encoded_metadata = NativePrefixProtobufMetadataCodec
+                .encode_frame_metadata(
+                    StableContainerWireFormat::metadata_context(),
+                    &case.metadata(next_uuid(), Some(prebuilt.encoding.clone())),
+                )
+                .expect("diagnostic metadata should encode");
             let id_label = match diagnostic {
                 BenchDiagnostic::TxOnly => "diagnostic_tx_only",
                 BenchDiagnostic::RxOnly => "diagnostic_rx_only",
@@ -621,7 +644,8 @@ fn bench_payload_contract_metadata_only_matrix(
     for contract in payload_cases {
         let case = BenchCase::new(contract.name());
         let metadata = case.metadata(next_uuid(), None);
-        let encoded = StableContainerWireFormat::encode_frame_metadata(&metadata)
+        let encoded = NativePrefixProtobufMetadataCodec
+            .encode_frame_metadata(StableContainerWireFormat::metadata_context(), &metadata)
             .expect("diagnostic metadata should encode");
         group.bench_function(
             BenchmarkId::new(
@@ -630,12 +654,18 @@ fn bench_payload_contract_metadata_only_matrix(
             ),
             |b| {
                 b.iter(|| {
-                    let encoded =
-                        StableContainerWireFormat::encode_frame_metadata(black_box(&metadata))
-                            .expect("diagnostic metadata should encode");
-                    let decoded =
-                        StableContainerWireFormat::decode_frame_metadata(black_box(&encoded))
-                            .expect("diagnostic metadata should decode");
+                    let encoded = NativePrefixProtobufMetadataCodec
+                        .encode_frame_metadata(
+                            StableContainerWireFormat::metadata_context(),
+                            black_box(&metadata),
+                        )
+                        .expect("diagnostic metadata should encode");
+                    let decoded = NativePrefixProtobufMetadataCodec
+                        .decode_frame_metadata(
+                            StableContainerWireFormat::metadata_context(),
+                            black_box(&encoded),
+                        )
+                        .expect("diagnostic metadata should decode");
                     black_box(decoded);
                 });
             },
@@ -663,7 +693,8 @@ fn bench_payload_contract_zero_copy_diagnostic_matrix(
         }
         let case = BenchCase::new(contract.name());
         let metadata = case.metadata(next_uuid(), None);
-        let encoded_metadata = StableContainerWireFormat::encode_frame_metadata(&metadata)
+        let encoded_metadata = NativePrefixProtobufMetadataCodec
+            .encode_frame_metadata(StableContainerWireFormat::metadata_context(), &metadata)
             .expect("diagnostic zero-copy metadata should encode");
         let payload_len = payload_contract::stable_payload_len(contract);
         let parameter = format!(
@@ -756,10 +787,12 @@ fn bench_payload_contract_zero_copy_diagnostic_matrix(
                 }
                 BenchDiagnostic::ZcFilterOnly => {
                     b.iter(|| {
-                        let decoded = StableContainerWireFormat::decode_frame_metadata(black_box(
-                            &encoded_metadata,
-                        ))
-                        .expect("zero-copy filter diagnostic metadata should decode");
+                        let decoded = NativePrefixProtobufMetadataCodec
+                            .decode_frame_metadata(
+                                StableContainerWireFormat::metadata_context(),
+                                black_box(&encoded_metadata),
+                            )
+                            .expect("zero-copy filter diagnostic metadata should decode");
                         let source_matches = case.source.matches(decoded.attributes().source());
                         let sink_matches = decoded.attributes().sink().is_none();
                         black_box(source_matches && sink_matches);
@@ -1064,7 +1097,11 @@ async fn receive_zero_copy_frame(
     case: &BenchCase,
     expected_id: &UUID,
     timeout: Duration,
-) -> up_rust::UWireRx<up_transport_iceoryx2_rust::Iceoryx2RxLease, StableContainerWireFormat> {
+) -> up_rust::UWireRx<
+    up_transport_iceoryx2_rust::Iceoryx2RxLease,
+    StableContainerWireFormat,
+    NativePrefixProtobufMetadataCodec,
+> {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());

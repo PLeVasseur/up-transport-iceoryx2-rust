@@ -9,11 +9,12 @@ use std::{sync::Arc, sync::Mutex as StdMutex, time::Duration};
 use async_trait::async_trait;
 use tokio::sync::{Mutex as TokioMutex, MutexGuard};
 use up_rust::{
-    NATIVE_PREFIX_METADATA_LAYOUT_ID, PROTOBUF_PAYLOAD_FAMILY_ID, PayloadEncoding, PayloadFormat,
-    ProtobufWire, StableContainerWireFormat, UCode, UFrameMetadata, UFrameView, UMessageBuilder,
-    UPayloadFormat, UStatus, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UWire, UWireMetadata,
-    UWireRx, UWithWire, UZeroCopyListener, UZeroCopyTransport, UZeroCopyUninitTransport,
-    WireIdentity, XCDR_V2_WIRE_ID,
+    NATIVE_PREFIX_METADATA_LAYOUT_ID, NativePrefixProtobufMetadataCodec,
+    PROTOBUF_PAYLOAD_FAMILY_ID, PayloadEncoding, PayloadFormat, ProtobufWire,
+    StableContainerWireFormat, UCode, UFrameMetadata, UFrameView, UMessageBuilder, UPayloadFormat,
+    UStatus, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UWire, UWireMetadataCodec, UWireRx,
+    UWireTransport, UZeroCopyListener, UZeroCopyTransport, UZeroCopyUninitTransport, WireIdentity,
+    XCDR_V2_WIRE_ID,
 };
 use up_transport_iceoryx2_rust::{Iceoryx2PubSub, Iceoryx2RxLease};
 use up_wire_xcdrv2::{VEHICLE_SIGNAL_V1_GOLDEN_BYTES, XCDR_V2_ENCODING_ID, XcdrV2Wire};
@@ -39,9 +40,11 @@ fn metadata_no_payload(topic: UUri) -> UFrameMetadata {
     UFrameMetadata::new(message.attributes().clone(), None).expect("metadata")
 }
 
-async fn prime_subscriber<W>(transport: &up_rust::UWireTransport<Iceoryx2PubSub, W>, source: &UUri)
-where
-    W: UWireMetadata + Send + Sync + 'static,
+async fn prime_subscriber<W>(
+    transport: &UWireTransport<Iceoryx2PubSub, W, NativePrefixProtobufMetadataCodec>,
+    source: &UUri,
+) where
+    W: UWire + Send + Sync + 'static,
 {
     match transport.receive_zero_copy(source, None).await {
         Ok(_) => panic!("subscriber unexpectedly received before send"),
@@ -91,10 +94,10 @@ async fn prepared_metadata_passes_through_for_required_wires() {
 
 async fn assert_prepared_metadata<W>(test_name: &str, payload_encoding: PayloadEncoding)
 where
-    W: UWireMetadata + Default + Send + Sync + 'static,
+    W: UWire + Default + Send + Sync + 'static,
 {
     let core = Iceoryx2PubSub::new();
-    let transport = core.with_wire(W::default());
+    let transport = UWireTransport::new(core, W::default(), NativePrefixProtobufMetadataCodec);
     let frame_metadata = metadata(topic(test_name), payload_encoding);
     let mut tx = transport
         .loan_tx(UTxLoanSpec::payload(frame_metadata.clone(), 4, 1).expect("loan spec"))
@@ -107,15 +110,25 @@ where
         tx.encoded_metadata().len()
     );
     assert_eq!(tx.header().payload_len, 4);
-    let decoded = W::decode_frame_metadata(tx.encoded_metadata()).expect("decode");
+    let decoded = NativePrefixProtobufMetadataCodec
+        .decode_frame_metadata(W::metadata_context(), tx.encoded_metadata())
+        .expect("decode");
     assert_eq!(decoded, frame_metadata);
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn external_xcdrv2_bytes_round_trip_through_real_pull_receive() {
     let _guard = iceoryx2_test_guard().await;
-    let publisher = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
-    let subscriber = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
+    let publisher = UWireTransport::new(
+        Iceoryx2PubSub::new(),
+        XcdrV2Wire,
+        NativePrefixProtobufMetadataCodec,
+    );
+    let subscriber = UWireTransport::new(
+        Iceoryx2PubSub::new(),
+        XcdrV2Wire,
+        NativePrefixProtobufMetadataCodec,
+    );
     let source = topic("xcdr-round-trip");
     prime_subscriber(&subscriber, &source).await;
     let frame_metadata = metadata(source.clone(), XcdrV2Wire::encoding());
@@ -150,8 +163,16 @@ async fn external_xcdrv2_bytes_round_trip_through_real_pull_receive() {
 async fn wrong_wire_is_rejected_before_public_receive() {
     let _guard = iceoryx2_test_guard().await;
     let source = topic("wrong-wire");
-    let publisher = Iceoryx2PubSub::new().with_wire(ProtobufWire);
-    let subscriber = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
+    let publisher = UWireTransport::new(
+        Iceoryx2PubSub::new(),
+        ProtobufWire,
+        NativePrefixProtobufMetadataCodec,
+    );
+    let subscriber = UWireTransport::new(
+        Iceoryx2PubSub::new(),
+        XcdrV2Wire,
+        NativePrefixProtobufMetadataCodec,
+    );
     prime_subscriber(&subscriber, &source).await;
     let frame_metadata = metadata_no_payload(source.clone());
     let tx = publisher
@@ -184,8 +205,16 @@ impl UWire for XcdrWireWrongPayloadFamily {
 async fn payload_family_mismatch_is_distinct_from_wrong_wire() {
     let _guard = iceoryx2_test_guard().await;
     let source = topic("payload-family-mismatch");
-    let publisher = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
-    let subscriber = Iceoryx2PubSub::new().with_wire(XcdrWireWrongPayloadFamily);
+    let publisher = UWireTransport::new(
+        Iceoryx2PubSub::new(),
+        XcdrV2Wire,
+        NativePrefixProtobufMetadataCodec,
+    );
+    let subscriber = UWireTransport::new(
+        Iceoryx2PubSub::new(),
+        XcdrWireWrongPayloadFamily,
+        NativePrefixProtobufMetadataCodec,
+    );
     prime_subscriber(&subscriber, &source).await;
     let frame_metadata = metadata_no_payload(source.clone());
     let tx = publisher
@@ -207,8 +236,16 @@ async fn payload_family_mismatch_is_distinct_from_wrong_wire() {
 #[tokio::test(flavor = "multi_thread")]
 async fn uninit_tx_loan_commits_initialized_payload() {
     let _guard = iceoryx2_test_guard().await;
-    let publisher = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
-    let subscriber = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
+    let publisher = UWireTransport::new(
+        Iceoryx2PubSub::new(),
+        XcdrV2Wire,
+        NativePrefixProtobufMetadataCodec,
+    );
+    let subscriber = UWireTransport::new(
+        Iceoryx2PubSub::new(),
+        XcdrV2Wire,
+        NativePrefixProtobufMetadataCodec,
+    );
     let source = topic("uninit-tx");
     prime_subscriber(&subscriber, &source).await;
     let frame_metadata = metadata(source.clone(), XcdrV2Wire::encoding());
@@ -235,8 +272,16 @@ async fn uninit_tx_loan_commits_initialized_payload() {
 #[tokio::test(flavor = "multi_thread")]
 async fn no_payload_round_trip_preserves_absence() {
     let _guard = iceoryx2_test_guard().await;
-    let publisher = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
-    let subscriber = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
+    let publisher = UWireTransport::new(
+        Iceoryx2PubSub::new(),
+        XcdrV2Wire,
+        NativePrefixProtobufMetadataCodec,
+    );
+    let subscriber = UWireTransport::new(
+        Iceoryx2PubSub::new(),
+        XcdrV2Wire,
+        NativePrefixProtobufMetadataCodec,
+    );
     let source = topic("no-payload");
     prime_subscriber(&subscriber, &source).await;
     let frame_metadata = metadata_no_payload(source.clone());
@@ -257,8 +302,16 @@ async fn no_payload_round_trip_preserves_absence() {
 async fn listener_receives_and_unregister_stops_delivery() {
     let _guard = iceoryx2_test_guard().await;
     let source = topic("listener-unregister");
-    let publisher = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
-    let listener_transport = Iceoryx2PubSub::new().with_wire(XcdrV2Wire);
+    let publisher = UWireTransport::new(
+        Iceoryx2PubSub::new(),
+        XcdrV2Wire,
+        NativePrefixProtobufMetadataCodec,
+    );
+    let listener_transport = UWireTransport::new(
+        Iceoryx2PubSub::new(),
+        XcdrV2Wire,
+        NativePrefixProtobufMetadataCodec,
+    );
     let listener = Arc::new(CountingListener::default());
     listener_transport
         .register_zero_copy_listener(&source, None, listener.clone())
@@ -284,7 +337,7 @@ async fn listener_receives_and_unregister_stops_delivery() {
 }
 
 async fn send_payload(
-    publisher: &up_rust::UWireTransport<Iceoryx2PubSub, XcdrV2Wire>,
+    publisher: &UWireTransport<Iceoryx2PubSub, XcdrV2Wire, NativePrefixProtobufMetadataCodec>,
     source: UUri,
     payload: &[u8],
 ) {
@@ -309,8 +362,13 @@ impl CountingListener {
 }
 
 #[async_trait]
-impl UZeroCopyListener<UWireRx<Iceoryx2RxLease, XcdrV2Wire>> for CountingListener {
-    async fn on_receive_zero_copy(&self, frame: UWireRx<Iceoryx2RxLease, XcdrV2Wire>) {
+impl UZeroCopyListener<UWireRx<Iceoryx2RxLease, XcdrV2Wire, NativePrefixProtobufMetadataCodec>>
+    for CountingListener
+{
+    async fn on_receive_zero_copy(
+        &self,
+        frame: UWireRx<Iceoryx2RxLease, XcdrV2Wire, NativePrefixProtobufMetadataCodec>,
+    ) {
         self.payloads
             .lock()
             .expect("payload lock")
