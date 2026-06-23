@@ -69,6 +69,9 @@ enum BenchDiagnostic {
     TxOnly,
     RxOnly,
     CopyLedger,
+    ProtobufEncodeOnly,
+    ProtobufValidateOnly,
+    ProtobufOwnedAckOnly,
     ZcInitOnly,
     ZcSendOnly,
     ZcRxOnly,
@@ -90,6 +93,9 @@ impl BenchDiagnostic {
             "tx-only" => Self::TxOnly,
             "rx-only" => Self::RxOnly,
             "copy-ledger" => Self::CopyLedger,
+            "protobuf-encode-only" => Self::ProtobufEncodeOnly,
+            "protobuf-validate-only" => Self::ProtobufValidateOnly,
+            "protobuf-owned-ack-only" => Self::ProtobufOwnedAckOnly,
             "zc-init-only" => Self::ZcInitOnly,
             "zc-send-only" => Self::ZcSendOnly,
             "zc-rx-only" => Self::ZcRxOnly,
@@ -98,7 +104,7 @@ impl BenchDiagnostic {
             "zc-copy-ledger" => Self::ZcCopyLedger,
             "zc-loan-provenance-check" => Self::ZcLoanProvenanceCheck,
             other => panic!(
-                "TRANSPORT_BENCH_DIAGNOSTIC must be one of authority, prebuilt-payload, metadata-only, tx-only, rx-only, copy-ledger, zc-init-only, zc-send-only, zc-rx-only, zc-validation-only, zc-filter-only, zc-copy-ledger, zc-loan-provenance-check; got {other}"
+                "TRANSPORT_BENCH_DIAGNOSTIC must be one of authority, prebuilt-payload, metadata-only, tx-only, rx-only, copy-ledger, protobuf-encode-only, protobuf-validate-only, protobuf-owned-ack-only, zc-init-only, zc-send-only, zc-rx-only, zc-validation-only, zc-filter-only, zc-copy-ledger, zc-loan-provenance-check; got {other}"
             ),
         }
     }
@@ -668,6 +674,77 @@ fn bench_payload_contract_metadata_only_matrix(
                         .expect("diagnostic metadata should decode");
                     black_box(decoded);
                 });
+            },
+        );
+    }
+    group.finish();
+}
+
+#[cfg(all(feature = "payload-contract-benchmarks", feature = "benchmark-owned"))]
+fn bench_payload_contract_protobuf_fixture_diagnostic_matrix(
+    c: &mut Criterion,
+    diagnostic: BenchDiagnostic,
+    group_name: &'static str,
+    payload_cases: &[PayloadContractCase],
+) {
+    let _validate = DiagnosticValidate::from_env();
+    let mut group = c.benchmark_group(group_name);
+    for contract in payload_cases {
+        let case = BenchCase::new(contract.name());
+        let id_label = match diagnostic {
+            BenchDiagnostic::ProtobufEncodeOnly => "diagnostic_protobuf_encode_only",
+            BenchDiagnostic::ProtobufValidateOnly => "diagnostic_protobuf_validate_only",
+            BenchDiagnostic::ProtobufOwnedAckOnly => "diagnostic_protobuf_owned_ack_only",
+            _ => unreachable!("unsupported protobuf fixture diagnostic"),
+        };
+        let expected_len =
+            payload_contract::protobuf_encoded_len(contract, PAYLOAD_CONTRACT_SEQUENCE);
+        let prebuilt =
+            payload_contract::protobuf_encoded_bytes_for(contract, PAYLOAD_CONTRACT_SEQUENCE)
+                .expect("protobuf diagnostic payload should serialize");
+        group.bench_function(
+            BenchmarkId::new(
+                format!("protobuf_owned_full_{id_label}"),
+                format!(
+                    "fixture/{}/{}/{}",
+                    contract.name(),
+                    contract.semantic_reference_len(),
+                    expected_len
+                ),
+            ),
+            |b| match diagnostic {
+                BenchDiagnostic::ProtobufEncodeOnly => {
+                    b.iter(|| {
+                        let bytes = payload_contract::protobuf_encoded_bytes_for(
+                            black_box(contract),
+                            PAYLOAD_CONTRACT_SEQUENCE,
+                        )
+                        .expect("protobuf diagnostic payload should serialize");
+                        black_box(bytes.len());
+                    });
+                }
+                BenchDiagnostic::ProtobufValidateOnly => {
+                    b.iter(|| {
+                        payload_contract::validate_protobuf_bytes(
+                            black_box(contract),
+                            PAYLOAD_CONTRACT_SEQUENCE,
+                            black_box(&prebuilt),
+                        )
+                        .expect("protobuf diagnostic payload should validate");
+                    });
+                }
+                BenchDiagnostic::ProtobufOwnedAckOnly => {
+                    b.iter(|| {
+                        let metadata =
+                            case.metadata(next_uuid(), Some(ProtobufPayload::encoding()));
+                        let frame =
+                            UOwnedFrame::with_payload(metadata, Bytes::copy_from_slice(&prebuilt))
+                                .expect("valid protobuf diagnostic owned frame");
+                        let ack = protobuf_payload_contract_ack(frame, black_box(contract));
+                        black_box(ack.transported_payload_len);
+                    });
+                }
+                _ => unreachable!("unsupported protobuf fixture diagnostic"),
             },
         );
     }
@@ -1389,6 +1466,17 @@ fn bench_payload_contract_for_diagnostic(
                 path_mode,
             );
         }
+        #[cfg(feature = "benchmark-owned")]
+        BenchDiagnostic::ProtobufEncodeOnly
+        | BenchDiagnostic::ProtobufValidateOnly
+        | BenchDiagnostic::ProtobufOwnedAckOnly => {
+            bench_payload_contract_protobuf_fixture_diagnostic_matrix(
+                c,
+                diagnostic,
+                group_name,
+                payload_cases,
+            );
+        }
         BenchDiagnostic::ZcInitOnly
         | BenchDiagnostic::ZcSendOnly
         | BenchDiagnostic::ZcRxOnly
@@ -1411,7 +1499,10 @@ fn bench_payload_contract_for_diagnostic(
         BenchDiagnostic::PrebuiltPayload
         | BenchDiagnostic::TxOnly
         | BenchDiagnostic::RxOnly
-        | BenchDiagnostic::CopyLedger => {
+        | BenchDiagnostic::CopyLedger
+        | BenchDiagnostic::ProtobufEncodeOnly
+        | BenchDiagnostic::ProtobufValidateOnly
+        | BenchDiagnostic::ProtobufOwnedAckOnly => {
             panic!("TRANSPORT_BENCH_DIAGNOSTIC mode requires feature benchmark-owned")
         }
     }
