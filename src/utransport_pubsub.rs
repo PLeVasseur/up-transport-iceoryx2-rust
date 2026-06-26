@@ -749,8 +749,8 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
     type Rx = Iceoryx2RxLease;
 
     async fn loan_prepared_tx(&self, spec: PreparedTxLoanSpec) -> Result<Self::Tx, UStatus> {
-        let (metadata, encoded_metadata, payload_len, alignment) = spec.into_parts();
-        validate_alignment(alignment)?;
+        let payload_alignment = spec.payload_alignment_proof();
+        let (metadata, encoded_metadata, payload_len, _) = spec.into_parts();
         let source = metadata.attributes().source();
         let service_name = compute_service_name(
             source,
@@ -762,6 +762,7 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
             .get_or_create_publisher(service_name, source)
             .await?;
         notify_broad_receivers(&service_name, source).await?;
+        let alignment = payload_alignment.as_usize();
         let sample_len =
             worst_case_aligned_sample_len(encoded_metadata.len(), payload_len, alignment)?;
         let mut sample = publisher
@@ -938,8 +939,8 @@ impl UZeroCopyUninitTransportCore for Iceoryx2PubSub {
         &self,
         spec: PreparedTxLoanSpec,
     ) -> Result<Self::UninitTx, UStatus> {
-        let (metadata, encoded_metadata, payload_len, alignment) = spec.into_parts();
-        validate_alignment(alignment)?;
+        let payload_alignment = spec.payload_alignment_proof();
+        let (metadata, encoded_metadata, payload_len, _) = spec.into_parts();
         let source = metadata.attributes().source();
         let service_name = compute_service_name(
             source,
@@ -951,6 +952,7 @@ impl UZeroCopyUninitTransportCore for Iceoryx2PubSub {
             .get_or_create_publisher(service_name, source)
             .await?;
         notify_broad_receivers(&service_name, source).await?;
+        let alignment = payload_alignment.as_usize();
         let sample_len =
             worst_case_aligned_sample_len(encoded_metadata.len(), payload_len, alignment)?;
         let mut sample = publisher
@@ -1004,16 +1006,6 @@ fn lease_from_sample(
         source_filter_hint,
         sink_filter_hint,
     })
-}
-
-fn validate_alignment(alignment: usize) -> Result<(), UStatus> {
-    if alignment == 0 || !alignment.is_power_of_two() {
-        return Err(UStatus::fail_with_code(
-            UCode::InvalidArgument,
-            "payload alignment must be a non-zero power of two",
-        ));
-    }
-    Ok(())
 }
 
 fn map_loan_error(error: LoanError, operation: &str) -> UStatus {
