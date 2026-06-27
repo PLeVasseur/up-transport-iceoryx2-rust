@@ -5,7 +5,7 @@
 // ################################################################################
 
 use iceoryx2::prelude::{MessagingPattern, ServiceName};
-use up_rust::{UCode, UMessageType, UStatus, UUri};
+use up_rust::{ExactUUri, UCode, UMessageType, UStatus, UUri};
 
 fn encode_uuri_segments(uuri: &UUri) -> Vec<String> {
     vec![
@@ -89,6 +89,12 @@ pub(crate) fn compute_service_name(
     })
 }
 
+pub(crate) fn compute_exact_source_publish_subscribe_service_name(
+    source: &ExactUUri,
+) -> Result<ServiceName, UStatus> {
+    compute_service_name(source.as_uuri(), None, MessagingPattern::PublishSubscribe)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -103,5 +109,19 @@ mod tests {
         let source = test_uri("device1", 0, 0x10ab, 3, 0x7fff);
         let name = compute_service_name(&source, None, MessagingPattern::PublishSubscribe).unwrap();
         assert_eq!(name.as_str(), "up/device1/10AB/0/3/7FFF");
+    }
+
+    #[test]
+    fn exact_publish_service_name_requires_exact_source_proof() {
+        let source = ExactUUri::try_from(test_uri("device1", 0, 0x10ab, 3, 0x7fff)).unwrap();
+        let name = compute_exact_source_publish_subscribe_service_name(&source).unwrap();
+        assert_eq!(name.as_str(), "up/device1/10AB/0/3/7FFF");
+    }
+
+    #[test]
+    fn exact_publish_service_name_rejects_wildcard_source_before_mapping() {
+        let wildcard = UUri::try_from_parts("device1", 0x10ab, 3, 0xffff).unwrap();
+
+        assert!(ExactUUri::try_from(wildcard).is_err());
     }
 }

@@ -25,13 +25,15 @@ use std::{
 };
 use tokio::sync::{Mutex, RwLock};
 use up_rust::{
-    LoanedPayload, PayloadLoanProvenance, PreparedTxLoanSpec, UCode, UEncodedLoanedRxFrame,
-    UEncodedRxFrame, UEncodedZeroCopyListener, UFrameMetadata, UStatus, UTxBuffer, UUninitTxBuffer,
-    UUri, UZeroCopyTransportCore, UZeroCopyUninitTransportCore,
+    ExactUUri, LoanedPayload, PayloadLoanProvenance, PreparedTxLoanSpec, UCode,
+    UEncodedLoanedRxFrame, UEncodedRxFrame, UEncodedZeroCopyListener, UFrameMetadata, UStatus,
+    UTxBuffer, UUninitTxBuffer, UUri, UZeroCopyTransportCore, UZeroCopyUninitTransportCore,
 };
 
 use crate::service_attributes::{attributes_match_source_filter, source_attribute_verifier};
-use crate::service_name_mapping::compute_service_name;
+use crate::service_name_mapping::{
+    compute_exact_source_publish_subscribe_service_name, compute_service_name,
+};
 use crate::uprotocolheader::{
     Iceoryx2PayloadLayout, UProtocolHeader, frame_contract_error_to_status,
 };
@@ -164,6 +166,13 @@ impl Iceoryx2PubSub {
             MessagingPattern::PublishSubscribe,
         )
         .map(|service_name| service_name.as_str().to_owned())
+    }
+
+    pub fn exact_source_publish_subscribe_service_name(
+        source: &ExactUUri,
+    ) -> Result<String, UStatus> {
+        compute_exact_source_publish_subscribe_service_name(source)
+            .map(|service_name| service_name.as_str().to_owned())
     }
 
     pub fn discover_service_names(&self) -> Result<Vec<String>, UStatus> {

@@ -9,7 +9,7 @@ use std::{sync::Arc, sync::Mutex as StdMutex, time::Duration};
 use async_trait::async_trait;
 use tokio::sync::{Mutex as TokioMutex, MutexGuard};
 use up_rust::{
-    NATIVE_PREFIX_METADATA_LAYOUT_ID, NativePrefixProtobufMetadataCodec,
+    ExactUUri, NATIVE_PREFIX_METADATA_LAYOUT_ID, NativePrefixProtobufMetadataCodec,
     PROTOBUF_PAYLOAD_FAMILY_ID, PayloadEncoding, PayloadFormat, ProtobufWire,
     StableContainerWireFormat, UCode, UFrameMetadata, UFrameView, UMessageBuilder, UPayloadFormat,
     UStatus, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UWire, UWireMetadataCodec, UWireRx,
@@ -28,6 +28,24 @@ async fn iceoryx2_test_guard() -> MutexGuard<'static, ()> {
 fn topic(test_name: &str) -> UUri {
     let authority = format!("iox-usr09i-{test_name}-{}", std::process::id());
     UUri::try_from_parts(&authority, 0x4210, 0x01, 0x9000).expect("topic URI")
+}
+
+#[test]
+fn exact_source_service_name_helper_requires_exact_uuri() {
+    let source = ExactUUri::try_from(topic("exact-service-name")).expect("exact source");
+
+    let name =
+        Iceoryx2PubSub::exact_source_publish_subscribe_service_name(&source).expect("service name");
+
+    assert!(name.starts_with("up/iox-usr09i-exact-service-name-"));
+    assert!(name.ends_with("/4210/0/1/9000"));
+}
+
+#[test]
+fn exact_source_service_name_helper_rejects_wildcard_before_mapping() {
+    let wildcard = UUri::try_from_parts("vehicle", 0x4210, 0x01, 0xFFFF).unwrap();
+
+    assert!(ExactUUri::try_from(wildcard).is_err());
 }
 
 fn metadata(topic: UUri, payload_encoding: PayloadEncoding) -> UFrameMetadata {
