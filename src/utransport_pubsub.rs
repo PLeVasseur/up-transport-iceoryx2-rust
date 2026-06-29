@@ -6,7 +6,9 @@
 
 use async_trait::async_trait;
 use iceoryx2::port::LoanError;
-use iceoryx2::prelude::{AllocationStrategy, CallbackProgression, MessagingPattern, Service};
+use iceoryx2::prelude::{
+    AllocationStrategy, CallbackProgression, Config, MessagingPattern, SemanticString, Service,
+};
 use iceoryx2::sample::Sample;
 use iceoryx2::sample_mut::SampleMut;
 use iceoryx2::sample_mut_uninit::SampleMutUninit;
@@ -17,6 +19,7 @@ use iceoryx2::{
     service::builder::publish_subscribe::PublishSubscribeOpenError,
     service::ipc_threadsafe,
 };
+use iceoryx2_bb_system_types::{file_name::FileName, path::Path};
 use std::{
     collections::{HashMap, VecDeque},
     io::Cursor,
@@ -132,9 +135,25 @@ impl Iceoryx2PubSub {
 
     #[must_use]
     pub fn with_config(config: Iceoryx2PubSubConfig) -> Self {
-        let node = NodeBuilder::new()
-            .create::<ipc_threadsafe::Service>()
-            .expect("failed to create iceoryx2 node");
+        let mut node_builder = NodeBuilder::new();
+        if let Some(iceoryx2_config) = &config.iceoryx2_config {
+            node_builder = node_builder.config(iceoryx2_config);
+        }
+        let node = match node_builder.create::<ipc_threadsafe::Service>() {
+            Ok(node) => node,
+            Err(error) if config.iceoryx2_config.is_none() => {
+                let fallback_config = Self::fallback_iceoryx2_config();
+                NodeBuilder::new()
+                    .config(&fallback_config)
+                    .create::<ipc_threadsafe::Service>()
+                    .unwrap_or_else(|fallback_error| {
+                        panic!(
+                            "failed to create iceoryx2 node: {error}; fallback config failed: {fallback_error}"
+                        )
+                    })
+            }
+            Err(error) => panic!("failed to create iceoryx2 node: {error}"),
+        };
         let inner = Arc::new(Iceoryx2PubSubInner {
             node,
             config,
@@ -146,6 +165,27 @@ impl Iceoryx2PubSub {
         });
         Iceoryx2WorkerDispatcher::start_listener_worker(inner.clone());
         Self { inner }
+    }
+
+    fn fallback_iceoryx2_config() -> Config {
+        let mut config = Config::default();
+        if let Ok(root_path) = std::env::var("UP_ICEORYX2_ROOT_PATH") {
+            if let Ok(root_path) = Path::new(root_path.as_bytes()) {
+                config.global.set_root_path(&root_path);
+            }
+        } else {
+            config
+                .global
+                .set_root_path(&Path::new(b"/tmp/up-iceoryx2").expect("fallback root path"));
+        }
+        if let Ok(prefix) = std::env::var("UP_ICEORYX2_PREFIX") {
+            if let Ok(prefix) = FileName::new(prefix.as_bytes()) {
+                config.global.prefix = prefix;
+            }
+        } else {
+            config.global.prefix = FileName::new(b"up_iceoryx2_").expect("fallback prefix");
+        }
+        config
     }
 
     pub async fn pull_mismatch_queue_diagnostics(&self) -> PullMismatchQueueDiagnostics {
@@ -555,12 +595,13 @@ pub struct PullMismatchQueueDiagnostics {
     pub last_mismatch_reason: Option<String>,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Iceoryx2PubSubConfig {
     pub publisher_initial_max_slice_len: usize,
     pub publisher_allocation_strategy: AllocationStrategy,
     pub pull_mismatch_queue_capacity: usize,
     pub pull_mismatch_queue_full_policy: Iceoryx2PullMismatchQueueFullPolicy,
+    pub iceoryx2_config: Option<Config>,
 }
 
 impl Default for Iceoryx2PubSubConfig {
@@ -571,6 +612,7 @@ impl Default for Iceoryx2PubSubConfig {
             pull_mismatch_queue_capacity: 64,
             pull_mismatch_queue_full_policy:
                 Iceoryx2PullMismatchQueueFullPolicy::DropOldestAndReport,
+            iceoryx2_config: None,
         }
     }
 }
@@ -588,6 +630,12 @@ impl Iceoryx2PubSubConfig {
     #[must_use]
     pub fn with_pull_mismatch_queue_capacity(mut self, value: usize) -> Self {
         self.pull_mismatch_queue_capacity = value;
+        self
+    }
+
+    #[must_use]
+    pub fn with_iceoryx2_config(mut self, value: Config) -> Self {
+        self.iceoryx2_config = Some(value);
         self
     }
 }
