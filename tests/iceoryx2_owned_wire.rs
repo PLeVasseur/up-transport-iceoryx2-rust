@@ -8,7 +8,7 @@ use bytes::Bytes;
 use up_rust::{
     EncodedOwnedFrame, NativePrefixProtobufMetadataCodec, PayloadEncoding, ProtobufWire,
     UFrameMetadata, UMessageBuilder, UOwnedFrame, UOwnedTransport, UPayloadFormat, UUri, UWire,
-    UWireMetadataCodec, UWireTransport,
+    UWireMetadataCodec,
 };
 use up_transport_iceoryx2_rust::Iceoryx2OwnedCore;
 
@@ -29,11 +29,7 @@ fn metadata(topic: UUri) -> UFrameMetadata {
 #[tokio::test]
 async fn owned_core_carries_prepared_metadata_behind_feature() {
     let core = Iceoryx2OwnedCore::new();
-    let transport = UWireTransport::new(
-        core.clone(),
-        ProtobufWire::default(),
-        NativePrefixProtobufMetadataCodec,
-    );
+    let transport = core.clone().with_selected_wire(ProtobufWire::default());
     let frame_metadata = metadata(topic("send"));
     let frame =
         UOwnedFrame::with_payload(frame_metadata.clone(), b"owned".to_vec()).expect("owned frame");
@@ -62,11 +58,7 @@ async fn owned_core_rejects_wrong_wire_before_exposure() {
     ))
     .await;
 
-    let transport = UWireTransport::new(
-        core,
-        up_wire_xcdrv2::XcdrV2Wire,
-        NativePrefixProtobufMetadataCodec,
-    );
+    let transport = core.with_selected_wire(up_wire_xcdrv2::XcdrV2Wire);
     let error = transport
         .receive_owned(&source, None)
         .await

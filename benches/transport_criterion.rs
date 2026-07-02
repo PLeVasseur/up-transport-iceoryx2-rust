@@ -20,10 +20,10 @@ use up_rust::{
     UOwnedTransport, UOwnedTransportCore, UStatus,
 };
 use up_rust::{
-    NativePrefixProtobufMetadataCodec, PayloadEncoding, StableContainerWireFormat, UCode,
-    UEncodedRxFrame, UFrameMetadata, UFrameView, ULoanedContiguousZeroCopyRxFrame, UMessageBuilder,
-    UMessageType, UUID, UUri, UWire, UWireMetadataCodec, UWireTransport, UZeroCopyTransport,
-    UZeroCopyUninitTransportExt,
+    NativePrefixProtobufMetadataCodec, PayloadEncoding, StableContainerWireFormat,
+    StableContainerWireTransport, UCode, UEncodedRxFrame, UFrameMetadata, UFrameView,
+    ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUID, UUri, UWire,
+    UWireMetadataCodec, UWithNativePrefixWire, UZeroCopyTransport, UZeroCopyUninitTransportExt,
 };
 #[cfg(feature = "benchmark-owned")]
 use up_transport_iceoryx2_rust::{BenchmarkOwnedIceoryx2Core, Iceoryx2OwnedCore};
@@ -36,6 +36,12 @@ const CAMERA_STATIC_ALLOCATION: usize = 16 * 1_024 * 1_024;
 const UUID_LSB_BASE: u64 = 0x8000_0000_0000_0000;
 #[cfg(feature = "payload-contract-benchmarks")]
 const PAYLOAD_CONTRACT_SEQUENCE: u32 = 1;
+
+type StableIceoryx2Transport = StableContainerWireTransport<Iceoryx2PubSub>;
+#[cfg(feature = "benchmark-owned")]
+type StableOwnedIceoryx2Transport = StableContainerWireTransport<BenchmarkOwnedIceoryx2Core>;
+#[cfg(feature = "payload-contract-benchmarks")]
+type StableIceoryx2Rx = <StableIceoryx2Transport as UZeroCopyTransport>::Rx;
 
 #[derive(Clone, Copy)]
 enum BenchSuite {
@@ -384,21 +390,9 @@ struct PayloadContractAck {
 }
 
 struct BenchTransports {
-    zero_copy: Arc<
-        UWireTransport<
-            Iceoryx2PubSub,
-            StableContainerWireFormat,
-            NativePrefixProtobufMetadataCodec,
-        >,
-    >,
+    zero_copy: Arc<StableIceoryx2Transport>,
     #[cfg(feature = "benchmark-owned")]
-    owned: Arc<
-        UWireTransport<
-            BenchmarkOwnedIceoryx2Core,
-            StableContainerWireFormat,
-            NativePrefixProtobufMetadataCodec,
-        >,
-    >,
+    owned: Arc<StableOwnedIceoryx2Transport>,
 }
 
 #[cfg(feature = "payload-contract-benchmarks")]
@@ -470,15 +464,10 @@ impl BenchTransports {
         let config = Iceoryx2PubSubConfig::static_allocation(max_slice_len)
             .with_pull_mismatch_queue_capacity(4_096);
         let core = Iceoryx2PubSub::with_config(config);
-        let zero_copy = Arc::new(UWireTransport::new(
-            core.clone(),
-            StableContainerWireFormat,
-            NativePrefixProtobufMetadataCodec,
-        ));
+        let zero_copy = Arc::new(core.clone().into_stable_container_transport());
         #[cfg(feature = "benchmark-owned")]
-        let owned = Arc::new(
-            BenchmarkOwnedIceoryx2Core::new(core).with_selected_wire(StableContainerWireFormat),
-        );
+        let owned =
+            Arc::new(BenchmarkOwnedIceoryx2Core::new(core).into_stable_container_transport());
         Self {
             zero_copy,
             #[cfg(feature = "benchmark-owned")]
@@ -670,12 +659,8 @@ fn bench_payload_contract_owned_adapter_diagnostic_matrix(
             };
             let case = BenchCase::new(contract.name());
             let core = Iceoryx2OwnedCore::new();
-            let rx_transport = core.clone().with_selected_wire(StableContainerWireFormat);
-            let tx_transport = UWireTransport::new(
-                DiagnosticTxSinkCore,
-                StableContainerWireFormat,
-                NativePrefixProtobufMetadataCodec,
-            );
+            let rx_transport = core.clone().into_stable_container_transport();
+            let tx_transport = DiagnosticTxSinkCore.into_stable_container_transport();
             let encoded_metadata = NativePrefixProtobufMetadataCodec
                 .encode_frame_metadata(
                     StableContainerWireFormat::metadata_context(),
@@ -1401,7 +1386,7 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::CanClassicMax => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<CanClassicFrameV1>(metadata, |payload| {
+                .send_uninit_stable_payload::<CanClassicFrameV1>(metadata, |payload| {
                     payload_contract::init_can_classic_max(payload, PAYLOAD_CONTRACT_SEQUENCE)
                 })
                 .await
@@ -1409,7 +1394,7 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::CanFdMax => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<CanFdFrameV1>(metadata, |payload| {
+                .send_uninit_stable_payload::<CanFdFrameV1>(metadata, |payload| {
                     payload_contract::init_can_fd_max(payload, PAYLOAD_CONTRACT_SEQUENCE)
                 })
                 .await
@@ -1417,7 +1402,7 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::SomeIpSingleMtu => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<SomeIpSignalBatchMtuV1>(metadata, |payload| {
+                .send_uninit_stable_payload::<SomeIpSignalBatchMtuV1>(metadata, |payload| {
                     payload_contract::init_someip_single_mtu(payload, PAYLOAD_CONTRACT_SEQUENCE)
                 })
                 .await
@@ -1425,7 +1410,7 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::Streamer4k => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<StreamChunk4kV1>(metadata, |payload| {
+                .send_uninit_stable_payload::<StreamChunk4kV1>(metadata, |payload| {
                     payload_contract::init_streamer_4k(payload, PAYLOAD_CONTRACT_SEQUENCE)
                 })
                 .await
@@ -1433,7 +1418,7 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::RadarArs548DetectionList => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<RadarDetectionListArs548V1>(metadata, |payload| {
+                .send_uninit_stable_payload::<RadarDetectionListArs548V1>(metadata, |payload| {
                     payload_contract::init_radar_ars548_detection_list(
                         payload,
                         PAYLOAD_CONTRACT_SEQUENCE,
@@ -1444,7 +1429,7 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::Streamer64k => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<StreamChunk64kV1>(metadata, |payload| {
+                .send_uninit_stable_payload::<StreamChunk64kV1>(metadata, |payload| {
                     payload_contract::init_streamer_64k(payload, PAYLOAD_CONTRACT_SEQUENCE)
                 })
                 .await
@@ -1453,7 +1438,7 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::LidarHesaiAt128PointCloud => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<LidarPointCloudHesaiAt128V1>(metadata, |payload| {
+                .send_uninit_stable_payload::<LidarPointCloudHesaiAt128V1>(metadata, |payload| {
                     payload_contract::init_lidar_hesai_at128_point_cloud(
                         payload,
                         PAYLOAD_CONTRACT_SEQUENCE,
@@ -1465,15 +1450,12 @@ async fn send_stable_payload_contract(
         PayloadContractCaseKind::Camera8mpBayerRggb12p => {
             transports
                 .zero_copy
-                .send_uninit_stable_payload_as::<CameraBayerRggb12pFrame8mpV1>(
-                    metadata,
-                    |payload| {
-                        payload_contract::init_camera_8mp_bayer_rggb12p(
-                            payload,
-                            PAYLOAD_CONTRACT_SEQUENCE,
-                        )
-                    },
-                )
+                .send_uninit_stable_payload::<CameraBayerRggb12pFrame8mpV1>(metadata, |payload| {
+                    payload_contract::init_camera_8mp_bayer_rggb12p(
+                        payload,
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
+                })
                 .await
         }
     }
@@ -1552,11 +1534,7 @@ async fn receive_zero_copy_frame(
     case: &BenchCase,
     expected_id: &UUID,
     timeout: Duration,
-) -> up_rust::UWireRx<
-    up_transport_iceoryx2_rust::Iceoryx2RxLease,
-    StableContainerWireFormat,
-    NativePrefixProtobufMetadataCodec,
-> {
+) -> StableIceoryx2Rx {
     receive_zero_copy_frame_for_filter(transports, &case.source, expected_id, timeout).await
 }
 
@@ -1566,11 +1544,7 @@ async fn receive_zero_copy_frame_for_filter(
     source_filter: &UUri,
     expected_id: &UUID,
     timeout: Duration,
-) -> up_rust::UWireRx<
-    up_transport_iceoryx2_rust::Iceoryx2RxLease,
-    StableContainerWireFormat,
-    NativePrefixProtobufMetadataCodec,
-> {
+) -> StableIceoryx2Rx {
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
         let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());

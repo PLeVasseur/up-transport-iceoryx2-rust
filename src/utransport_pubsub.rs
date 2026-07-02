@@ -29,8 +29,9 @@ use std::{
 use tokio::sync::{Mutex, RwLock};
 use up_rust::{
     ExactUUri, LoanedPayload, PayloadLoanProvenance, PreparedTxLoanSpec, UCode,
-    UEncodedLoanedRxFrame, UEncodedRxFrame, UEncodedZeroCopyListener, UFrameMetadata, UStatus,
-    UTxBuffer, UUninitTxBuffer, UUri, UZeroCopyTransportCore, UZeroCopyUninitTransportCore,
+    UEncodedLoanedRxFrame, UEncodedRxFrame, UEncodedZeroCopyListener, UFrameMetadata,
+    UNativePrefixWireTransport, UStatus, UTxBuffer, UUninitTxBuffer, UUri, UWire,
+    UWithNativePrefixWire, UZeroCopyTransportCore, UZeroCopyUninitTransportCore,
 };
 
 use crate::service_attributes::{attributes_match_source_filter, source_attribute_verifier};
@@ -165,6 +166,15 @@ impl Iceoryx2PubSub {
         });
         Iceoryx2WorkerDispatcher::start_listener_worker(inner.clone());
         Self { inner }
+    }
+
+    /// Wraps this core in the generic selected-wire adapter.
+    #[must_use]
+    pub fn with_selected_wire<W>(self, wire: W) -> UNativePrefixWireTransport<Self, W>
+    where
+        W: UWire,
+    {
+        self.into_native_prefix_wire_transport(wire)
     }
 
     fn fallback_iceoryx2_config() -> Config {
