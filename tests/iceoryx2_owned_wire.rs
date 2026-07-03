@@ -5,10 +5,13 @@
 // ################################################################################
 
 use bytes::Bytes;
+use up_rust::transport_implementer_api::EncodedOwnedFrame;
+use up_rust::wire_implementer_api::{
+    NativePrefixProtobufMetadataCodec, ProtobufWire, UWire, UWireMetadataCodec,
+};
 use up_rust::{
-    EncodedOwnedFrame, NativePrefixProtobufMetadataCodec, PayloadEncoding, ProtobufWire,
-    UFrameMetadata, UMessageBuilder, UOwnedFrame, UOwnedTransport, UPayloadFormat, UUri, UWire,
-    UWireMetadataCodec,
+    PayloadEncoding, UFrameMetadata, UMessageBuilder, UOwnedFrame, UOwnedTransport, UPayloadFormat,
+    UUri,
 };
 use up_transport_iceoryx2_rust::Iceoryx2OwnedCore;
 

@@ -27,11 +27,15 @@ use std::{
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak},
 };
 use tokio::sync::{Mutex, RwLock};
+use up_rust::selected_wire_user_api::{UNativePrefixWireTransport, UWithNativePrefixWire};
+use up_rust::transport_implementer_api::{
+    PreparedTxLoanSpec, UEncodedLoanedRxFrame, UEncodedRxFrame, UEncodedZeroCopyListener,
+    UZeroCopyTransportCore, UZeroCopyUninitTransportCore,
+};
+use up_rust::wire_implementer_api::UWire;
 use up_rust::{
-    ExactUUri, LoanedPayload, PayloadLoanProvenance, PreparedTxLoanSpec, UCode,
-    UEncodedLoanedRxFrame, UEncodedRxFrame, UEncodedZeroCopyListener, UFrameMetadata,
-    UNativePrefixWireTransport, UStatus, UTxBuffer, UUninitTxBuffer, UUri, UWire,
-    UWithNativePrefixWire, UZeroCopyTransportCore, UZeroCopyUninitTransportCore,
+    ExactUUri, LoanedPayload, PayloadLoanProvenance, UCode, UFrameMetadata, UStatus, UTxBuffer,
+    UUninitTxBuffer, UUri,
 };
 
 use crate::service_attributes::{attributes_match_source_filter, source_attribute_verifier};

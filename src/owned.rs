@@ -14,11 +14,13 @@ use std::{collections::VecDeque, sync::Arc};
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Mutex;
-use up_rust::{
-    EncodedOwnedFrame, PreparedOwnedFrame, PreparedTxLoanSpec, UCode, UEncodedOwnedListener,
-    UEncodedRxFrame, UEncodedZeroCopyListener, UNativePrefixWireTransport, UOwnedTransportCore,
-    UStatus, UTxBuffer, UUri, UWire, UWithNativePrefixWire, UZeroCopyTransportCore,
+use up_rust::selected_wire_user_api::{UNativePrefixWireTransport, UWithNativePrefixWire};
+use up_rust::transport_implementer_api::{
+    EncodedOwnedFrame, PreparedOwnedFrame, PreparedTxLoanSpec, UEncodedOwnedListener,
+    UEncodedRxFrame, UEncodedZeroCopyListener, UOwnedTransportCore, UZeroCopyTransportCore,
 };
+use up_rust::wire_implementer_api::UWire;
+use up_rust::{UCode, UStatus, UTxBuffer, UUri};
 
 use crate::{Iceoryx2PubSub, Iceoryx2RxLease};
 

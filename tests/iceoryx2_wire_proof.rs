@@ -8,13 +8,16 @@ use std::{sync::Arc, sync::Mutex as StdMutex, time::Duration};
 
 use async_trait::async_trait;
 use tokio::sync::{Mutex as TokioMutex, MutexGuard};
+use up_rust::selected_wire_user_api::UNativePrefixWireTransport;
+use up_rust::wire_implementer_api::{
+    NATIVE_PREFIX_METADATA_LAYOUT_ID, NativePrefixProtobufMetadataCodec,
+    PROTOBUF_PAYLOAD_FAMILY_ID, ProtobufWire, StableContainerWireFormat, UWire, UWireMetadataCodec,
+    WireIdentity, XCDR_V2_WIRE_ID,
+};
 use up_rust::{
-    ExactUUri, NATIVE_PREFIX_METADATA_LAYOUT_ID, NativePrefixProtobufMetadataCodec,
-    PROTOBUF_PAYLOAD_FAMILY_ID, PayloadEncoding, PayloadFormat, ProtobufWire,
-    StableContainerWireFormat, UCode, UFrameMetadata, UFrameView, UMessageBuilder,
-    UNativePrefixWireTransport, UPayloadFormat, UStatus, UTxBuffer, UTxLoanSpec, UUninitTxBuffer,
-    UUri, UWire, UWireMetadataCodec, UZeroCopyListener, UZeroCopyTransport,
-    UZeroCopyUninitTransport, WireIdentity, XCDR_V2_WIRE_ID,
+    ExactUUri, PayloadEncoding, PayloadFormat, UCode, UFrameMetadata, UFrameView, UMessageBuilder,
+    UPayloadFormat, UStatus, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UZeroCopyListener,
+    UZeroCopyTransport, UZeroCopyUninitTransport,
 };
 use up_transport_iceoryx2_rust::{Iceoryx2PubSub, Iceoryx2PubSubConfig};
 use up_wire_xcdrv2::{VEHICLE_SIGNAL_V1_GOLDEN_BYTES, XCDR_V2_ENCODING_ID, XcdrV2Wire};

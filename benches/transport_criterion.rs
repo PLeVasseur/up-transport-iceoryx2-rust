@@ -14,17 +14,21 @@ use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_ma
 use tokio::runtime::Runtime;
 #[cfg(feature = "payload-contract-benchmarks")]
 use up_rust::bench_fixtures::payload_contract::{self, *};
+use up_rust::selected_wire_user_api::{StableContainerWireTransport, UWithNativePrefixWire};
+use up_rust::transport_implementer_api::UEncodedRxFrame;
 #[cfg(feature = "benchmark-owned")]
-use up_rust::{
-    EncodedOwnedFrame, PreparedOwnedFrame, ProtobufPayload, UEncodedOwnedListener, UOwnedFrame,
-    UOwnedTransport, UOwnedTransportCore, UStatus,
+use up_rust::transport_implementer_api::{
+    EncodedOwnedFrame, PreparedOwnedFrame, UEncodedOwnedListener, UOwnedTransportCore,
+};
+use up_rust::wire_implementer_api::{
+    NativePrefixProtobufMetadataCodec, StableContainerWireFormat, UWire, UWireMetadataCodec,
 };
 use up_rust::{
-    NativePrefixProtobufMetadataCodec, PayloadEncoding, StableContainerWireFormat,
-    StableContainerWireTransport, UCode, UEncodedRxFrame, UFrameMetadata, UFrameView,
-    ULoanedContiguousZeroCopyRxFrame, UMessageBuilder, UMessageType, UUID, UUri, UWire,
-    UWireMetadataCodec, UWithNativePrefixWire, UZeroCopyTransport, UZeroCopyUninitTransportExt,
+    PayloadEncoding, UCode, UFrameMetadata, UFrameView, ULoanedContiguousZeroCopyRxFrame,
+    UMessageBuilder, UMessageType, UUID, UUri, UZeroCopyTransport, UZeroCopyUninitTransportExt,
 };
+#[cfg(feature = "benchmark-owned")]
+use up_rust::{ProtobufPayload, UOwnedFrame, UOwnedTransport, UStatus};
 #[cfg(feature = "benchmark-owned")]
 use up_transport_iceoryx2_rust::{BenchmarkOwnedIceoryx2Core, Iceoryx2OwnedCore};
 use up_transport_iceoryx2_rust::{Iceoryx2PubSub, Iceoryx2PubSubConfig, UProtocolHeader};
