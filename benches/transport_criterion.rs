@@ -21,11 +21,11 @@ use up_rust::transport_implementer_api::{
     EncodedOwnedFrame, PreparedOwnedFrame, UEncodedOwnedListener, UOwnedTransportCore,
 };
 use up_rust::wire_implementer_api::{
-    NativePrefixProtobufMetadataCodec, StableContainerWireFormat, UWire, UWireMetadataCodec,
+    NativePrefixFrameMetadataCodec, StableContainerWireFormat, UWire, UWireMetadataCodec,
 };
 use up_rust::{
     PayloadEncoding, UCode, UFrameMetadata, UFrameView, ULoanedContiguousZeroCopyRxFrame,
-    UMessageBuilder, UMessageType, UUID, UUri, UZeroCopyTransport, UZeroCopyUninitTransportExt,
+    UMessageType, UUID, UUri, UZeroCopyTransport, UZeroCopyUninitTransportExt,
 };
 #[cfg(feature = "benchmark-owned")]
 use up_rust::{ProtobufPayload, UOwnedFrame, UOwnedTransport, UStatus};
@@ -376,10 +376,11 @@ impl BenchCase {
         id: UUID,
         encoding: Option<PayloadEncoding>,
     ) -> UFrameMetadata {
-        let mut builder = UMessageBuilder::publish(source);
-        builder.with_message_id(id);
-        let message = builder.build().expect("valid benchmark message");
-        UFrameMetadata::new(message.attributes().clone(), encoding).expect("valid metadata")
+        let mut builder = UFrameMetadata::publish(source).with_id(id);
+        if let Some(encoding) = encoding {
+            builder = builder.with_payload_encoding(encoding);
+        }
+        builder.build().expect("valid metadata")
     }
 }
 
@@ -665,7 +666,7 @@ fn bench_payload_contract_owned_adapter_diagnostic_matrix(
             let core = Iceoryx2OwnedCore::new();
             let rx_transport = core.clone().into_stable_container_transport();
             let tx_transport = DiagnosticTxSinkCore.into_stable_container_transport();
-            let encoded_metadata = NativePrefixProtobufMetadataCodec
+            let encoded_metadata = NativePrefixFrameMetadataCodec
                 .encode_frame_metadata(
                     StableContainerWireFormat::metadata_context(),
                     &case.metadata(next_uuid(), Some(prebuilt.encoding.clone())),
@@ -754,7 +755,7 @@ fn bench_payload_contract_metadata_only_matrix(
     for contract in payload_cases {
         let case = BenchCase::new(contract.name());
         let metadata = case.metadata(next_uuid(), None);
-        let encoded = NativePrefixProtobufMetadataCodec
+        let encoded = NativePrefixFrameMetadataCodec
             .encode_frame_metadata(StableContainerWireFormat::metadata_context(), &metadata)
             .expect("diagnostic metadata should encode");
         emit_p51_iceoryx2_sample(&P51Iceoryx2Sample {
@@ -773,13 +774,13 @@ fn bench_payload_contract_metadata_only_matrix(
             ),
             |b| {
                 b.iter(|| {
-                    let encoded = NativePrefixProtobufMetadataCodec
+                    let encoded = NativePrefixFrameMetadataCodec
                         .encode_frame_metadata(
                             StableContainerWireFormat::metadata_context(),
                             black_box(&metadata),
                         )
                         .expect("diagnostic metadata should encode");
-                    let decoded = NativePrefixProtobufMetadataCodec
+                    let decoded = NativePrefixFrameMetadataCodec
                         .decode_frame_metadata(
                             StableContainerWireFormat::metadata_context(),
                             black_box(&encoded),
@@ -883,7 +884,7 @@ fn bench_payload_contract_zero_copy_diagnostic_matrix(
         }
         let case = BenchCase::new(contract.name());
         let metadata = case.metadata(next_uuid(), None);
-        let encoded_metadata = NativePrefixProtobufMetadataCodec
+        let encoded_metadata = NativePrefixFrameMetadataCodec
             .encode_frame_metadata(StableContainerWireFormat::metadata_context(), &metadata)
             .expect("diagnostic zero-copy metadata should encode");
         if let Some(sample) =
@@ -982,14 +983,14 @@ fn bench_payload_contract_zero_copy_diagnostic_matrix(
                 }
                 BenchDiagnostic::ZcFilterOnly => {
                     b.iter(|| {
-                        let decoded = NativePrefixProtobufMetadataCodec
+                        let decoded = NativePrefixFrameMetadataCodec
                             .decode_frame_metadata(
                                 StableContainerWireFormat::metadata_context(),
                                 black_box(&encoded_metadata),
                             )
                             .expect("zero-copy filter diagnostic metadata should decode");
-                        let source_matches = case.source.matches(decoded.attributes().source());
-                        let sink_matches = decoded.attributes().sink().is_none();
+                        let source_matches = case.source.matches(decoded.source());
+                        let sink_matches = decoded.sink().is_none();
                         black_box(source_matches && sink_matches);
                     });
                 }
@@ -1094,7 +1095,7 @@ fn bench_payload_contract_zero_copy_diagnostic_matrix(
                                 let frame =
                                     receive_zero_copy_frame(transports, &case, &id, timeout).await;
                                 let start = Instant::now();
-                                let decoded = NativePrefixProtobufMetadataCodec
+                                let decoded = NativePrefixFrameMetadataCodec
                                     .decode_frame_metadata(
                                         StableContainerWireFormat::metadata_context(),
                                         frame.raw().encoded_metadata(),
@@ -1109,16 +1110,14 @@ fn bench_payload_contract_zero_copy_diagnostic_matrix(
                 }
                 BenchDiagnostic::ZcRxAdapterFilterDropOnly => {
                     b.iter(|| {
-                        let decoded = NativePrefixProtobufMetadataCodec
+                        let decoded = NativePrefixFrameMetadataCodec
                             .decode_frame_metadata(
                                 StableContainerWireFormat::metadata_context(),
                                 black_box(&encoded_metadata),
                             )
                             .expect("adapter drop diagnostic metadata should decode");
-                        let dropped = !case
-                            .wildcard_source_filter
-                            .matches(decoded.attributes().source())
-                            || decoded.attributes().sink().is_some();
+                        let dropped = !case.wildcard_source_filter.matches(decoded.source())
+                            || decoded.sink().is_some();
                         black_box(dropped);
                     });
                 }
@@ -1563,7 +1562,7 @@ async fn receive_zero_copy_frame_for_filter(
         .await
         .expect("timed out waiting for iceoryx2 zero-copy diagnostic receive");
         match result {
-            Ok(frame) if frame.metadata().attributes().id() == expected_id => return frame,
+            Ok(frame) if frame.metadata().id() == expected_id => return frame,
             Ok(_) => continue,
             Err(status) if status.get_code() == UCode::NotFound => {
                 tokio::time::sleep(Duration::from_millis(1)).await;
@@ -1588,7 +1587,7 @@ async fn exact_source_observed_once(
     )
     .await
     {
-        Ok(Ok(frame)) => frame.metadata().attributes().id() == unexpected_id,
+        Ok(Ok(frame)) => frame.metadata().id() == unexpected_id,
         Ok(Err(status)) if status.get_code() == UCode::NotFound => false,
         Ok(Err(status)) => {
             panic!("unexpected iceoryx2 source-prefilter probe error: {status:?}")
@@ -1621,8 +1620,8 @@ fn protobuf_payload_contract_ack(
     contract: &PayloadContractCase,
 ) -> PayloadContractAck {
     let transported_payload_len = frame.payload_bytes().len();
-    let id = frame.metadata().attributes().id().clone();
-    let message_type = frame.metadata().attributes().type_();
+    let id = frame.metadata().id().clone();
+    let message_type = frame.metadata().message_type();
     payload_contract::validate_protobuf_bytes(
         contract,
         PAYLOAD_CONTRACT_SEQUENCE,
@@ -1652,8 +1651,8 @@ fn stable_owned_payload_contract_ack(
     )
     .expect("stable owned payload-contract frame should validate");
     PayloadContractAck {
-        id: frame.metadata().attributes().id().clone(),
-        message_type: frame.metadata().attributes().type_(),
+        id: frame.metadata().id().clone(),
+        message_type: frame.metadata().message_type(),
         case_id: contract.case_id(),
         sequence: PAYLOAD_CONTRACT_SEQUENCE,
         semantic_reference_len: contract.semantic_reference_len(),
@@ -1673,8 +1672,8 @@ fn stable_payload_contract_ack(
     );
     validate_stable_payload_for_case(frame, contract);
     PayloadContractAck {
-        id: frame.metadata().attributes().id().clone(),
-        message_type: frame.metadata().attributes().type_(),
+        id: frame.metadata().id().clone(),
+        message_type: frame.metadata().message_type(),
         case_id: contract.case_id(),
         sequence: PAYLOAD_CONTRACT_SEQUENCE,
         semantic_reference_len: contract.semantic_reference_len(),

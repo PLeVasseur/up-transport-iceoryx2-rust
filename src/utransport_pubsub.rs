@@ -822,12 +822,9 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
     async fn loan_prepared_tx(&self, spec: PreparedTxLoanSpec) -> Result<Self::Tx, UStatus> {
         let payload_alignment = spec.payload_alignment_proof();
         let (metadata, encoded_metadata, payload_len, _) = spec.into_parts();
-        let source = metadata.attributes().source();
-        let service_name = compute_service_name(
-            source,
-            metadata.attributes().sink(),
-            MessagingPattern::PublishSubscribe,
-        )?;
+        let source = metadata.source();
+        let service_name =
+            compute_service_name(source, metadata.sink(), MessagingPattern::PublishSubscribe)?;
         let publisher = self
             .inner
             .get_or_create_publisher(service_name, source)
@@ -1012,12 +1009,9 @@ impl UZeroCopyUninitTransportCore for Iceoryx2PubSub {
     ) -> Result<Self::UninitTx, UStatus> {
         let payload_alignment = spec.payload_alignment_proof();
         let (metadata, encoded_metadata, payload_len, _) = spec.into_parts();
-        let source = metadata.attributes().source();
-        let service_name = compute_service_name(
-            source,
-            metadata.attributes().sink(),
-            MessagingPattern::PublishSubscribe,
-        )?;
+        let source = metadata.source();
+        let service_name =
+            compute_service_name(source, metadata.sink(), MessagingPattern::PublishSubscribe)?;
         let publisher = self
             .inner
             .get_or_create_publisher(service_name, source)

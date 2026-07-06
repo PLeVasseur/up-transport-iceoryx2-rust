@@ -7,12 +7,9 @@
 use bytes::Bytes;
 use up_rust::transport_implementer_api::EncodedOwnedFrame;
 use up_rust::wire_implementer_api::{
-    NativePrefixProtobufMetadataCodec, ProtobufWire, UWire, UWireMetadataCodec,
+    NativePrefixFrameMetadataCodec, ProtobufWire, UWire, UWireMetadataCodec,
 };
-use up_rust::{
-    PayloadEncoding, UFrameMetadata, UMessageBuilder, UOwnedFrame, UOwnedTransport, UPayloadFormat,
-    UUri,
-};
+use up_rust::{PayloadEncoding, UFrameMetadata, UOwnedFrame, UOwnedTransport, UUri};
 use up_transport_iceoryx2_rust::Iceoryx2OwnedCore;
 
 fn topic(test_name: &str) -> UUri {
@@ -21,12 +18,10 @@ fn topic(test_name: &str) -> UUri {
 }
 
 fn metadata(topic: UUri) -> UFrameMetadata {
-    let message = UMessageBuilder::publish(topic).build().expect("message");
-    UFrameMetadata::new(
-        message.attributes().clone(),
-        Some(PayloadEncoding::Standard(UPayloadFormat::Protobuf)),
-    )
-    .expect("metadata")
+    UFrameMetadata::publish(topic)
+        .with_payload_encoding(PayloadEncoding::PROTOBUF)
+        .build()
+        .expect("metadata")
 }
 
 #[tokio::test]
@@ -40,7 +35,7 @@ async fn owned_core_carries_prepared_metadata_behind_feature() {
     transport.send_owned(frame).await.expect("send owned");
 
     let sent = core.last_sent().await.expect("sent frame");
-    let decoded = NativePrefixProtobufMetadataCodec
+    let decoded = NativePrefixFrameMetadataCodec
         .decode_frame_metadata(ProtobufWire::metadata_context(), sent.encoded_metadata())
         .expect("decode");
     assert_eq!(decoded, frame_metadata);
@@ -51,7 +46,7 @@ async fn owned_core_carries_prepared_metadata_behind_feature() {
 async fn owned_core_rejects_wrong_wire_before_exposure() {
     let source = topic("wrong-wire");
     let metadata = metadata(source.clone());
-    let encoded = NativePrefixProtobufMetadataCodec
+    let encoded = NativePrefixFrameMetadataCodec
         .encode_frame_metadata(ProtobufWire::metadata_context(), &metadata)
         .expect("encode");
     let core = Iceoryx2OwnedCore::new();

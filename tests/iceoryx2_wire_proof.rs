@@ -10,14 +10,14 @@ use async_trait::async_trait;
 use tokio::sync::{Mutex as TokioMutex, MutexGuard};
 use up_rust::selected_wire_user_api::UNativePrefixWireTransport;
 use up_rust::wire_implementer_api::{
-    NATIVE_PREFIX_METADATA_LAYOUT_ID, NativePrefixProtobufMetadataCodec,
-    PROTOBUF_PAYLOAD_FAMILY_ID, ProtobufWire, StableContainerWireFormat, UWire, UWireMetadataCodec,
-    WireIdentity, XCDR_V2_WIRE_ID,
+    NATIVE_PREFIX_METADATA_LAYOUT_ID, NativePrefixFrameMetadataCodec, PROTOBUF_PAYLOAD_FAMILY_ID,
+    ProtobufWire, StableContainerWireFormat, UWire, UWireMetadataCodec, WireIdentity,
+    XCDR_V2_WIRE_ID,
 };
 use up_rust::{
-    ExactUUri, PayloadEncoding, PayloadFormat, UCode, UFrameMetadata, UFrameView, UMessageBuilder,
-    UPayloadFormat, UStatus, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UZeroCopyListener,
-    UZeroCopyTransport, UZeroCopyUninitTransport,
+    ExactUUri, PayloadEncoding, PayloadFormat, UCode, UFrameMetadata, UFrameView, UStatus,
+    UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UZeroCopyListener, UZeroCopyTransport,
+    UZeroCopyUninitTransport,
 };
 use up_transport_iceoryx2_rust::{Iceoryx2PubSub, Iceoryx2PubSubConfig};
 use up_wire_xcdrv2::{VEHICLE_SIGNAL_V1_GOLDEN_BYTES, XCDR_V2_ENCODING_ID, XcdrV2Wire};
@@ -73,24 +73,21 @@ fn exact_source_service_name_helper_rejects_wildcard_before_mapping() {
 }
 
 fn metadata(topic: UUri, payload_encoding: PayloadEncoding) -> UFrameMetadata {
-    let message = UMessageBuilder::publish(topic).build().expect("message");
-    UFrameMetadata::new(message.attributes().clone(), Some(payload_encoding)).expect("metadata")
+    UFrameMetadata::publish(topic)
+        .with_payload_encoding(payload_encoding)
+        .build()
+        .expect("metadata")
 }
 
 fn metadata_no_payload(topic: UUri) -> UFrameMetadata {
-    let message = UMessageBuilder::publish(topic).build().expect("message");
-    UFrameMetadata::new(message.attributes().clone(), None).expect("metadata")
+    UFrameMetadata::publish(topic).build().expect("metadata")
 }
 
 fn request_metadata(reply_to: UUri, method: UUri) -> UFrameMetadata {
-    let message = UMessageBuilder::request(method, reply_to, 5_000)
+    UFrameMetadata::request(method, reply_to, Duration::from_millis(5_000))
+        .with_payload_encoding(PayloadEncoding::PROTOBUF)
         .build()
-        .expect("request message");
-    UFrameMetadata::new(
-        message.attributes().clone(),
-        Some(PayloadEncoding::Standard(UPayloadFormat::Protobuf)),
-    )
-    .expect("request metadata")
+        .expect("request metadata")
 }
 
 async fn prime_subscriber<W>(transport: &NativeIceoryx2Transport<W>, source: &UUri)
@@ -150,11 +147,7 @@ async fn receive_request_with_retry(
 #[tokio::test(flavor = "multi_thread")]
 async fn prepared_metadata_passes_through_for_required_wires() {
     let _guard = iceoryx2_test_guard().await;
-    assert_prepared_metadata::<ProtobufWire>(
-        "protobuf-prepared",
-        PayloadEncoding::Standard(UPayloadFormat::Protobuf),
-    )
-    .await;
+    assert_prepared_metadata::<ProtobufWire>("protobuf-prepared", PayloadEncoding::PROTOBUF).await;
     assert_prepared_metadata::<StableContainerWireFormat>(
         "stable-prepared",
         PayloadEncoding::custom(
@@ -185,7 +178,7 @@ where
         tx.encoded_metadata().len()
     );
     assert_eq!(tx.header().payload_len, 4);
-    let decoded = NativePrefixProtobufMetadataCodec
+    let decoded = NativePrefixFrameMetadataCodec
         .decode_frame_metadata(W::metadata_context(), tx.encoded_metadata())
         .expect("decode");
     assert_eq!(decoded, frame_metadata);
