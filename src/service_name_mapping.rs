@@ -34,13 +34,26 @@ pub(crate) fn get_authority_name(source_uuri: &UUri) -> String {
 
 fn determine_message_type(
     source: &UUri,
-    _sink: Option<&UUri>,
+    sink: Option<&UUri>,
     messaging_pattern: MessagingPattern,
 ) -> Result<UMessageType, UStatus> {
-    if !source.authority_name().is_empty()
-        && messaging_pattern == MessagingPattern::PublishSubscribe
-    {
-        return Ok(UMessageType::Publish);
+    if messaging_pattern == MessagingPattern::PublishSubscribe {
+        return match sink {
+            Some(sink) if source.is_rpc_response() && sink.is_rpc_method() => {
+                Ok(UMessageType::Request)
+            }
+            Some(sink) if source.is_rpc_method() && sink.is_rpc_response() => {
+                Ok(UMessageType::Response)
+            }
+            Some(sink) if source.is_event() && sink.is_notification_destination() => {
+                Ok(UMessageType::Notification)
+            }
+            None if !source.authority_name().is_empty() => Ok(UMessageType::Publish),
+            _ => Err(UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                "could not determine a valid UMessageType from the provided UUri(s)",
+            )),
+        };
     }
 
     Err(UStatus::fail_with_code(
@@ -109,6 +122,41 @@ mod tests {
         let source = test_uri("device1", 0, 0x10ab, 3, 0x7fff);
         let name = compute_service_name(&source, None, MessagingPattern::PublishSubscribe).unwrap();
         assert_eq!(name.as_str(), "up/device1/10AB/0/3/7FFF");
+    }
+
+    #[test]
+    fn request_service_name_uses_sink_method_uri() {
+        let reply_to = test_uri("client", 0, 0x10ab, 3, 0x0000);
+        let method = test_uri("service", 0, 0x20bc, 1, 0x1000);
+
+        let name =
+            compute_service_name(&reply_to, Some(&method), MessagingPattern::PublishSubscribe)
+                .unwrap();
+
+        assert_eq!(name.as_str(), "up/service/20BC/0/1/1000");
+    }
+
+    #[test]
+    fn response_service_name_uses_source_and_sink_uri() {
+        let method = test_uri("service", 0, 0x20bc, 1, 0x1000);
+        let reply_to = test_uri("client", 0, 0x10ab, 3, 0x0000);
+
+        let name =
+            compute_service_name(&method, Some(&reply_to), MessagingPattern::PublishSubscribe)
+                .unwrap();
+
+        assert_eq!(name.as_str(), "up/service/20BC/0/1/1000/client/10AB/0/3/0");
+    }
+
+    #[test]
+    fn notification_service_name_uses_source_and_sink_uri() {
+        let source = test_uri("device1", 0, 0x10ab, 3, 0x8000);
+        let sink = test_uri("client", 0, 0x20bc, 1, 0x0000);
+
+        let name =
+            compute_service_name(&source, Some(&sink), MessagingPattern::PublishSubscribe).unwrap();
+
+        assert_eq!(name.as_str(), "up/device1/10AB/0/3/8000/client/20BC/0/1/0");
     }
 
     #[test]

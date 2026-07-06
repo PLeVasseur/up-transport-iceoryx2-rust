@@ -82,6 +82,17 @@ fn metadata_no_payload(topic: UUri) -> UFrameMetadata {
     UFrameMetadata::new(message.attributes().clone(), None).expect("metadata")
 }
 
+fn request_metadata(reply_to: UUri, method: UUri) -> UFrameMetadata {
+    let message = UMessageBuilder::request(method, reply_to, 5_000)
+        .build()
+        .expect("request message");
+    UFrameMetadata::new(
+        message.attributes().clone(),
+        Some(PayloadEncoding::Standard(UPayloadFormat::Protobuf)),
+    )
+    .expect("request metadata")
+}
+
 async fn prime_subscriber<W>(transport: &NativeIceoryx2Transport<W>, source: &UUri)
 where
     W: UWire + Send + Sync + 'static,
@@ -100,6 +111,30 @@ where
     for _ in 0..50 {
         match f().await {
             Ok(value) => return Ok(value),
+            Err(error) => {
+                if error.get_code() != UCode::NotFound {
+                    return Err(error);
+                }
+                last = Some(error);
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+    }
+    Err(last.expect("receive attempted at least once"))
+}
+
+async fn receive_request_with_retry(
+    subscriber: NativeIceoryx2Transport<ProtobufWire>,
+    source_filter: UUri,
+    sink_filter: UUri,
+) -> Result<Vec<u8>, UStatus> {
+    let mut last = None;
+    for _ in 0..100 {
+        match subscriber
+            .receive_zero_copy(&source_filter, Some(&sink_filter))
+            .await
+        {
+            Ok(frame) => return Ok(frame.try_contiguous_payload().unwrap_or_default().to_vec()),
             Err(error) => {
                 if error.get_code() != UCode::NotFound {
                     return Err(error);
@@ -190,6 +225,41 @@ async fn external_xcdrv2_bytes_round_trip_through_real_pull_receive() {
         .custom_identity()
         .expect("custom identity");
     assert_eq!(encoding_id, XCDR_V2_ENCODING_ID);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_receive_accepts_wildcard_source_and_exact_method_sink() {
+    let _guard = iceoryx2_test_guard().await;
+    let config = test_config();
+    let publisher = core(&config).with_selected_wire(ProtobufWire::default());
+    let subscriber = core(&config).with_selected_wire(ProtobufWire::default());
+    let authority = format!("iox-usr09i-request-{}", std::process::id());
+    let reply_to = UUri::try_from_parts(&authority, 0x5BA0, 0x01, 0x0000).expect("reply-to URI");
+    let method = UUri::try_from_parts(&authority, 0x5BA0, 0x01, 0x1000).expect("method URI");
+    let source_filter =
+        UUri::try_from_parts("*", u32::MAX, u8::MAX, u16::MAX).expect("wildcard source");
+    let sink_filter = method.clone();
+
+    let receive_task = tokio::spawn(receive_request_with_retry(
+        subscriber,
+        source_filter,
+        sink_filter,
+    ));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+
+    let frame_metadata = request_metadata(reply_to, method);
+    let mut tx = publisher
+        .loan_tx(UTxLoanSpec::payload(frame_metadata, 7, 1).expect("loan spec"))
+        .await
+        .expect("loan");
+    tx.payload_mut().copy_from_slice(b"request");
+    publisher.send_zero_copy(tx).await.expect("send");
+
+    let payload = receive_task
+        .await
+        .expect("receive task")
+        .expect("request receive");
+    assert_eq!(payload, b"request");
 }
 
 #[tokio::test(flavor = "multi_thread")]
