@@ -140,13 +140,19 @@ impl Iceoryx2PubSub {
 
     #[must_use]
     pub fn with_config(config: Iceoryx2PubSubConfig) -> Self {
+        let env_config = if config.iceoryx2_config.is_none() {
+            Self::env_iceoryx2_config()
+        } else {
+            None
+        };
         let mut node_builder = NodeBuilder::new();
-        if let Some(iceoryx2_config) = &config.iceoryx2_config {
+        let effective_iceoryx2_config = config.iceoryx2_config.as_ref().or(env_config.as_ref());
+        if let Some(iceoryx2_config) = effective_iceoryx2_config {
             node_builder = node_builder.config(iceoryx2_config);
         }
         let node = match node_builder.create::<ipc_threadsafe::Service>() {
             Ok(node) => node,
-            Err(error) if config.iceoryx2_config.is_none() => {
+            Err(error) if effective_iceoryx2_config.is_none() => {
                 let fallback_config = Self::fallback_iceoryx2_config();
                 NodeBuilder::new()
                     .config(&fallback_config)
@@ -179,6 +185,16 @@ impl Iceoryx2PubSub {
         W: UWire,
     {
         self.into_native_prefix_wire_transport(wire)
+    }
+
+    fn env_iceoryx2_config() -> Option<Config> {
+        if std::env::var_os("UP_ICEORYX2_ROOT_PATH").is_none()
+            && std::env::var_os("UP_ICEORYX2_PREFIX").is_none()
+        {
+            None
+        } else {
+            Some(Self::fallback_iceoryx2_config())
+        }
     }
 
     fn fallback_iceoryx2_config() -> Config {
