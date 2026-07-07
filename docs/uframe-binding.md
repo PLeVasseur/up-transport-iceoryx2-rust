@@ -4,7 +4,7 @@ Binding id: `iceoryx2.uframe.prefix.v1`
 
 ## Physical Placement
 
-Selected-wire UFrame metadata is carried at the beginning of the iceoryx2 sample payload. The prefix contains the up-rust native-prefix metadata envelope: magic/version, selected-wire identity, payload-family identity, metadata-layout identity, and the selected metadata profile bytes.
+Selected-wire UFrame metadata is carried at the beginning of the iceoryx2 sample payload. The prefix contains the UFrame metadata envelope (see up-spec `basics/uframe.adoc`, Metadata envelope and identity registry): magic/version, selected-wire identity, payload-family identity, metadata-layout identity, and the selected metadata profile bytes.
 
 The application payload starts at the aligned payload offset recorded in the iceoryx2 user header. The hidden metadata prefix is not part of the application payload exposed by selected-wire receive APIs.
 
