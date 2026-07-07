@@ -1511,11 +1511,30 @@ dependencies = [
  "protoc-bin-vendored",
  "rand",
  "regex",
+ "tracing",
+ "up-rust-macros 0.10.0-SNAPSHOT (git+ssh://git@github.com/PLeVasseur/up-rust.git?rev=45263b6f97857f29e2d61815643d67051171e98e)",
+ "uriparse",
+ "uuid-simd",
+]
+
+[[package]]
+name = "up-rust"
+version = "0.10.0-SNAPSHOT"
+source = "git+ssh://git@github.com/PLeVasseur/up-rust.git?rev=e60a43987ee23d3da7d6e75bd9c6f92264823cbd#e60a43987ee23d3da7d6e75bd9c6f92264823cbd"
+dependencies = [
+ "async-trait",
+ "bytes",
+ "mediatype",
+ "protobuf",
+ "protobuf-codegen",
+ "protoc-bin-vendored",
+ "rand",
+ "regex",
  "serde",
  "serde_json",
  "sha2",
  "tracing",
- "up-rust-macros",
+ "up-rust-macros 0.10.0-SNAPSHOT (git+ssh://git@github.com/PLeVasseur/up-rust.git?rev=e60a43987ee23d3da7d6e75bd9c6f92264823cbd)",
  "uriparse",
  "uuid-simd",
 ]
@@ -1524,6 +1543,16 @@ dependencies = [
 name = "up-rust-macros"
 version = "0.10.0-SNAPSHOT"
 source = "git+ssh://git@github.com/PLeVasseur/up-rust.git?rev=45263b6f97857f29e2d61815643d67051171e98e#45263b6f97857f29e2d61815643d67051171e98e"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "up-rust-macros"
+version = "0.10.0-SNAPSHOT"
+source = "git+ssh://git@github.com/PLeVasseur/up-rust.git?rev=e60a43987ee23d3da7d6e75bd9c6f92264823cbd#e60a43987ee23d3da7d6e75bd9c6f92264823cbd"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1544,7 +1573,7 @@ dependencies = [
  "protobuf",
  "serde_json",
  "tokio",
- "up-rust",
+ "up-rust 0.10.0-SNAPSHOT (git+ssh://git@github.com/PLeVasseur/up-rust.git?rev=e60a43987ee23d3da7d6e75bd9c6f92264823cbd)",
  "up-wire-xcdrv2",
 ]
 
@@ -1553,7 +1582,7 @@ name = "up-wire-xcdrv2"
 version = "0.0.0"
 source = "git+ssh://git@github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=3a89a4699486d0bf37447a5c2d03ce4261b0dcfa#3a89a4699486d0bf37447a5c2d03ce4261b0dcfa"
 dependencies = [
- "up-rust",
+ "up-rust 0.10.0-SNAPSHOT (git+ssh://git@github.com/PLeVasseur/up-rust.git?rev=45263b6f97857f29e2d61815643d67051171e98e)",
  "up-wire-xcdrv2-macros",
 ]
 

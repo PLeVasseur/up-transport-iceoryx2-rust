@@ -19,7 +19,7 @@ harness = false
 required-features = ["payload-contract-benchmarks"]
 
 [dependencies]
-up-rust = { git = "ssh://git@github.com/PLeVasseur/up-rust.git", rev = "45263b6f97857f29e2d61815643d67051171e98e", default-features = false, features = ["protobuf-wire", "selected-wire-user-api", "transport-implementer-api", "wire-implementer-api"] }
+up-rust = { git = "ssh://git@github.com/PLeVasseur/up-rust.git", rev = "e60a43987ee23d3da7d6e75bd9c6f92264823cbd", default-features = false, features = ["protobuf-wire", "selected-wire-user-api", "transport-implementer-api", "wire-implementer-api"] }
 iceoryx2 = "0.9.2"
 iceoryx2-bb-container = "0.9.2"
 iceoryx2-bb-system-types = "0.9.2"
