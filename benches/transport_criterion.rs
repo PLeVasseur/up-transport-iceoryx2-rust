@@ -1390,7 +1390,10 @@ async fn send_stable_payload_contract(
             transports
                 .zero_copy
                 .send_uninit_stable_payload::<CanClassicFrameV1>(metadata, |payload| {
-                    payload_contract::init_can_classic_max(payload, PAYLOAD_CONTRACT_SEQUENCE)
+                    payload_contract::init_can_classic_max(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
                 })
                 .await
         }
@@ -1398,7 +1401,10 @@ async fn send_stable_payload_contract(
             transports
                 .zero_copy
                 .send_uninit_stable_payload::<CanFdFrameV1>(metadata, |payload| {
-                    payload_contract::init_can_fd_max(payload, PAYLOAD_CONTRACT_SEQUENCE)
+                    payload_contract::init_can_fd_max(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
                 })
                 .await
         }
@@ -1406,7 +1412,10 @@ async fn send_stable_payload_contract(
             transports
                 .zero_copy
                 .send_uninit_stable_payload::<SomeIpSignalBatchMtuV1>(metadata, |payload| {
-                    payload_contract::init_someip_single_mtu(payload, PAYLOAD_CONTRACT_SEQUENCE)
+                    payload_contract::init_someip_single_mtu(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
                 })
                 .await
         }
@@ -1414,7 +1423,10 @@ async fn send_stable_payload_contract(
             transports
                 .zero_copy
                 .send_uninit_stable_payload::<StreamChunk4kV1>(metadata, |payload| {
-                    payload_contract::init_streamer_4k(payload, PAYLOAD_CONTRACT_SEQUENCE)
+                    payload_contract::init_streamer_4k(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
                 })
                 .await
         }
@@ -1423,7 +1435,7 @@ async fn send_stable_payload_contract(
                 .zero_copy
                 .send_uninit_stable_payload::<RadarDetectionListArs548V1>(metadata, |payload| {
                     payload_contract::init_radar_ars548_detection_list(
-                        payload,
+                        payload.into_init(),
                         PAYLOAD_CONTRACT_SEQUENCE,
                     )
                 })
@@ -1433,7 +1445,10 @@ async fn send_stable_payload_contract(
             transports
                 .zero_copy
                 .send_uninit_stable_payload::<StreamChunk64kV1>(metadata, |payload| {
-                    payload_contract::init_streamer_64k(payload, PAYLOAD_CONTRACT_SEQUENCE)
+                    payload_contract::init_streamer_64k(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
                 })
                 .await
         }
@@ -1443,7 +1458,7 @@ async fn send_stable_payload_contract(
                 .zero_copy
                 .send_uninit_stable_payload::<LidarPointCloudHesaiAt128V1>(metadata, |payload| {
                     payload_contract::init_lidar_hesai_at128_point_cloud(
-                        payload,
+                        payload.into_init(),
                         PAYLOAD_CONTRACT_SEQUENCE,
                     )
                 })
@@ -1455,7 +1470,7 @@ async fn send_stable_payload_contract(
                 .zero_copy
                 .send_uninit_stable_payload::<CameraBayerRggb12pFrame8mpV1>(metadata, |payload| {
                     payload_contract::init_camera_8mp_bayer_rggb12p(
-                        payload,
+                        payload.into_init(),
                         PAYLOAD_CONTRACT_SEQUENCE,
                     )
                 })
@@ -1621,7 +1636,7 @@ fn protobuf_payload_contract_ack(
 ) -> PayloadContractAck {
     let transported_payload_len = frame.payload_bytes().len();
     let id = frame.metadata().id().clone();
-    let message_type = frame.metadata().message_type();
+    let message_type = frame.metadata().kind().to_legacy_type();
     payload_contract::validate_protobuf_bytes(
         contract,
         PAYLOAD_CONTRACT_SEQUENCE,
@@ -1652,7 +1667,7 @@ fn stable_owned_payload_contract_ack(
     .expect("stable owned payload-contract frame should validate");
     PayloadContractAck {
         id: frame.metadata().id().clone(),
-        message_type: frame.metadata().message_type(),
+        message_type: frame.metadata().kind().to_legacy_type(),
         case_id: contract.case_id(),
         sequence: PAYLOAD_CONTRACT_SEQUENCE,
         semantic_reference_len: contract.semantic_reference_len(),
@@ -1673,7 +1688,7 @@ fn stable_payload_contract_ack(
     validate_stable_payload_for_case(frame, contract);
     PayloadContractAck {
         id: frame.metadata().id().clone(),
-        message_type: frame.metadata().message_type(),
+        message_type: frame.metadata().kind().to_legacy_type(),
         case_id: contract.case_id(),
         sequence: PAYLOAD_CONTRACT_SEQUENCE,
         semantic_reference_len: contract.semantic_reference_len(),
