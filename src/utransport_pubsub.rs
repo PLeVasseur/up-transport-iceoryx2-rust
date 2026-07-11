@@ -257,6 +257,12 @@ impl Iceoryx2PubSub {
     }
 }
 
+impl Default for Iceoryx2PubSub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Iceoryx2PubSubInner {
     fn create_subscriber(
         &self,

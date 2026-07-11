@@ -4,14 +4,25 @@
 // SPDX-License-Identifier: Apache-2.0
 // ################################################################################
 
-#![allow(clippy::missing_panics_doc, clippy::too_many_lines)]
+#![allow(
+    clippy::missing_panics_doc,
+    clippy::too_many_arguments,
+    clippy::too_many_lines
+)]
 
+#[cfg(feature = "perf-diagnostics")]
+use std::{
+    fs::File,
+    io::{BufWriter, Write},
+};
 use std::{sync::Arc, time::Duration, time::Instant, time::SystemTime};
 
 #[cfg(feature = "benchmark-owned")]
 use bytes::Bytes;
 use criterion::{BenchmarkId, Criterion, black_box, criterion_group, criterion_main};
 use tokio::runtime::Runtime;
+#[cfg(feature = "perf-diagnostics")]
+use up_rust::UninitStableSendPhases;
 #[cfg(feature = "payload-contract-benchmarks")]
 use up_rust::bench_fixtures::payload_contract::{self, *};
 use up_rust::selected_wire_user_api::{StableContainerWireTransport, UWithNativePrefixWire};
@@ -40,6 +51,8 @@ const CAMERA_STATIC_ALLOCATION: usize = 16 * 1_024 * 1_024;
 const UUID_LSB_BASE: u64 = 0x8000_0000_0000_0000;
 #[cfg(feature = "payload-contract-benchmarks")]
 const PAYLOAD_CONTRACT_SEQUENCE: u32 = 1;
+#[cfg(feature = "perf-diagnostics")]
+const R8_UP_RUST_HEAD: &str = "eef9c445e2bdddacd6999739c83c1cd7c79a041d";
 
 type StableIceoryx2Transport = StableContainerWireTransport<Iceoryx2PubSub>;
 #[cfg(feature = "benchmark-owned")]
@@ -396,6 +409,8 @@ struct PayloadContractAck {
 
 struct BenchTransports {
     zero_copy: Arc<StableIceoryx2Transport>,
+    #[cfg(feature = "perf-diagnostics")]
+    zero_copy_core: Iceoryx2PubSub,
     #[cfg(feature = "benchmark-owned")]
     owned: Arc<StableOwnedIceoryx2Transport>,
 }
@@ -469,12 +484,16 @@ impl BenchTransports {
         let config = Iceoryx2PubSubConfig::static_allocation(max_slice_len)
             .with_pull_mismatch_queue_capacity(4_096);
         let core = Iceoryx2PubSub::with_config(config);
+        #[cfg(feature = "perf-diagnostics")]
+        let zero_copy_core = core.clone();
         let zero_copy = Arc::new(core.clone().into_stable_container_transport());
         #[cfg(feature = "benchmark-owned")]
         let owned =
             Arc::new(BenchmarkOwnedIceoryx2Core::new(core).into_stable_container_transport());
         Self {
             zero_copy,
+            #[cfg(feature = "perf-diagnostics")]
+            zero_copy_core,
             #[cfg(feature = "benchmark-owned")]
             owned,
         }
@@ -1480,6 +1499,306 @@ async fn send_stable_payload_contract(
     .expect("iceoryx2 payload-contract stable no-zero send should succeed");
 }
 
+#[cfg(feature = "perf-diagnostics")]
+async fn send_stable_payload_contract_phased(
+    transports: &BenchTransports,
+    metadata: UFrameMetadata,
+    contract: &PayloadContractCase,
+) -> Result<UninitStableSendPhases, UStatus> {
+    match contract.kind() {
+        PayloadContractCaseKind::CanClassicMax => {
+            transports
+                .zero_copy
+                .send_uninit_stable_payload_phased::<CanClassicFrameV1>(metadata, |payload| {
+                    payload_contract::init_can_classic_max(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
+                })
+                .await
+        }
+        PayloadContractCaseKind::CanFdMax => {
+            transports
+                .zero_copy
+                .send_uninit_stable_payload_phased::<CanFdFrameV1>(metadata, |payload| {
+                    payload_contract::init_can_fd_max(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
+                })
+                .await
+        }
+        PayloadContractCaseKind::SomeIpSingleMtu => {
+            transports
+                .zero_copy
+                .send_uninit_stable_payload_phased::<SomeIpSignalBatchMtuV1>(metadata, |payload| {
+                    payload_contract::init_someip_single_mtu(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
+                })
+                .await
+        }
+        PayloadContractCaseKind::Streamer4k => {
+            transports
+                .zero_copy
+                .send_uninit_stable_payload_phased::<StreamChunk4kV1>(metadata, |payload| {
+                    payload_contract::init_streamer_4k(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
+                })
+                .await
+        }
+        PayloadContractCaseKind::RadarArs548DetectionList => {
+            transports
+                .zero_copy
+                .send_uninit_stable_payload_phased::<RadarDetectionListArs548V1>(
+                    metadata,
+                    |payload| {
+                        payload_contract::init_radar_ars548_detection_list(
+                            payload.into_init(),
+                            PAYLOAD_CONTRACT_SEQUENCE,
+                        )
+                    },
+                )
+                .await
+        }
+        PayloadContractCaseKind::Streamer64k => {
+            transports
+                .zero_copy
+                .send_uninit_stable_payload_phased::<StreamChunk64kV1>(metadata, |payload| {
+                    payload_contract::init_streamer_64k(
+                        payload.into_init(),
+                        PAYLOAD_CONTRACT_SEQUENCE,
+                    )
+                })
+                .await
+        }
+        PayloadContractCaseKind::LidarHesaiAt128PointCloud => {
+            transports
+                .zero_copy
+                .send_uninit_stable_payload_phased::<LidarPointCloudHesaiAt128V1>(
+                    metadata,
+                    |payload| {
+                        payload_contract::init_lidar_hesai_at128_point_cloud(
+                            payload.into_init(),
+                            PAYLOAD_CONTRACT_SEQUENCE,
+                        )
+                    },
+                )
+                .await
+        }
+        PayloadContractCaseKind::Camera8mpBayerRggb12p => {
+            transports
+                .zero_copy
+                .send_uninit_stable_payload_phased::<CameraBayerRggb12pFrame8mpV1>(
+                    metadata,
+                    |payload| {
+                        payload_contract::init_camera_8mp_bayer_rggb12p(
+                            payload.into_init(),
+                            PAYLOAD_CONTRACT_SEQUENCE,
+                        )
+                    },
+                )
+                .await
+        }
+    }
+}
+
+#[cfg(feature = "perf-diagnostics")]
+type PhaseTraceContext<'a> = (
+    &'a BenchTransports,
+    &'a BenchCase,
+    &'a PayloadContractCase,
+    &'a mut BufWriter<File>,
+);
+
+#[cfg(feature = "perf-diagnostics")]
+async fn phase_trace_sample(
+    context: PhaseTraceContext<'_>,
+    stage: &str,
+    run: usize,
+    iteration: usize,
+) {
+    let (transports, case, contract, writer) = context;
+    let id = next_uuid();
+    let full_loop_start = Instant::now();
+    let phases =
+        send_stable_payload_contract_phased(transports, case.metadata(id.clone(), None), contract)
+            .await
+            .expect("phase trace selected-wire send should succeed");
+
+    let receive_start = Instant::now();
+    let frame = receive_zero_copy_frame(transports, case, &id, LARGE_SENSOR_BENCH_TIMEOUT).await;
+    let receive = receive_start.elapsed();
+
+    let validate_start = Instant::now();
+    assert_eq!(frame.metadata().id(), &id);
+    assert_eq!(
+        frame.metadata().kind().to_legacy_type(),
+        UMessageType::Publish
+    );
+    assert_eq!(
+        frame.payload_len(),
+        payload_contract_transported_len(PayloadContractPath::StableZcNoZero, contract)
+    );
+    black_box(
+        frame
+            .payload_loan_provenance()
+            .expect("phase trace payload should retain loan provenance"),
+    );
+    validate_stable_payload_for_case(&frame, contract);
+    let validate = validate_start.elapsed();
+
+    let release_start = Instant::now();
+    drop(frame);
+    let release = release_start.elapsed();
+    let full_loop_total = full_loop_start.elapsed();
+
+    let row = serde_json::json!({
+        "record_type": "sample",
+        "transport": "iceoryx2",
+        "case": contract.name(),
+        "semantic_reference_len": contract.semantic_reference_len(),
+        "transported_payload_len": payload_contract_transported_len(PayloadContractPath::StableZcNoZero, contract),
+        "stage": stage,
+        "run": run,
+        "iteration": iteration,
+        "cold_first_sample": stage == "warmup" && iteration == 0,
+        "prepare_ns": phases.prepare.as_nanos(),
+        "loan_ns": phases.loan.as_nanos(),
+        "verify_ns": phases.verify.as_nanos(),
+        "initialize_ns": phases.initialize.as_nanos(),
+        "witness_ns": phases.witness.as_nanos(),
+        "commit_ns": phases.commit.as_nanos(),
+        "send_total_ns": phases.total.as_nanos(),
+        "send_residual_ns": phases.residual.as_nanos(),
+        "receive_ns": receive.as_nanos(),
+        "validate_ns": validate.as_nanos(),
+        "release_ns": release.as_nanos(),
+        "full_loop_total_ns": full_loop_total.as_nanos(),
+    });
+    serde_json::to_writer(&mut *writer, &row).expect("serialize phase trace row");
+    writer.write_all(b"\n").expect("write phase trace newline");
+}
+
+#[cfg(feature = "perf-diagnostics")]
+fn phase_trace_case_filter_allows(contract: &PayloadContractCase) -> bool {
+    let Ok(filter) = std::env::var("TRANSPORT_BENCH_CASE_FILTER") else {
+        return true;
+    };
+    filter
+        .split(',')
+        .map(str::trim)
+        .filter(|case| !case.is_empty())
+        .any(|case| case == contract.name())
+}
+
+#[cfg(feature = "perf-diagnostics")]
+fn run_phase_trace_cases(
+    runtime: &Runtime,
+    writer: &mut BufWriter<File>,
+    cases: &[PayloadContractCase],
+    static_allocation: usize,
+    run: usize,
+) {
+    for contract in cases
+        .iter()
+        .filter(|contract| phase_trace_case_filter_allows(contract))
+    {
+        let transports = runtime.block_on(async { BenchTransports::build(static_allocation) });
+        let case = BenchCase::new(contract.name());
+        runtime.block_on(async {
+            prime_subscriber(&transports, &case).await;
+            for iteration in 0..16 {
+                phase_trace_sample(
+                    (&transports, &case, contract, writer),
+                    "warmup",
+                    0,
+                    iteration,
+                )
+                .await;
+            }
+            for iteration in 0..64 {
+                phase_trace_sample(
+                    (&transports, &case, contract, writer),
+                    "measured",
+                    run,
+                    iteration,
+                )
+                .await;
+            }
+            let queue = transports
+                .zero_copy_core
+                .pull_mismatch_queue_diagnostics()
+                .await;
+            let lifecycle = serde_json::json!({
+                "record_type": "lifecycle",
+                "transport": "iceoryx2",
+                "case": contract.name(),
+                "run": run,
+                "static_allocation": static_allocation,
+                "sent": 80,
+                "received": 80,
+                "released": 80,
+                "mismatch_queue_depth": queue.current_depth,
+                "dropped_mismatches": queue.dropped_mismatches,
+                "rejected_mismatches": queue.rejected_mismatches,
+            });
+            serde_json::to_writer(&mut *writer, &lifecycle)
+                .expect("serialize phase trace lifecycle");
+            writer
+                .write_all(b"\n")
+                .expect("write phase trace lifecycle newline");
+        });
+        writer.flush().expect("flush phase trace output");
+    }
+}
+
+#[cfg(feature = "perf-diagnostics")]
+fn run_phase_trace() {
+    let output = std::env::var("TRANSPORT_BENCH_PHASE_TRACE_OUTPUT")
+        .expect("TRANSPORT_BENCH_PHASE_TRACE_OUTPUT is required for phase trace mode");
+    let run = std::env::var("TRANSPORT_BENCH_PHASE_RUN_ID")
+        .unwrap_or_else(|_| "1".to_string())
+        .parse::<usize>()
+        .expect("TRANSPORT_BENCH_PHASE_RUN_ID should be an unsigned integer");
+    let file = File::create(output).expect("create phase trace output");
+    let mut writer = BufWriter::new(file);
+    let metadata = serde_json::json!({
+        "record_type": "metadata",
+        "transport": "iceoryx2",
+        "up_rust_head": R8_UP_RUST_HEAD,
+        "warmup_iterations": 16,
+        "measured_runs": 1,
+        "run_id": run,
+        "iterations_per_run": 64,
+        "clock_overhead_ns": UninitStableSendPhases::calibrate_clock_overhead(10_000).as_nanos(),
+        "sequence": PAYLOAD_CONTRACT_SEQUENCE,
+    });
+    serde_json::to_writer(&mut writer, &metadata).expect("serialize phase trace metadata");
+    writer
+        .write_all(b"\n")
+        .expect("write phase trace metadata newline");
+
+    let runtime = Runtime::new().expect("tokio runtime");
+    run_phase_trace_cases(
+        &runtime,
+        &mut writer,
+        payload_contract::core_cases(),
+        CORE_STATIC_ALLOCATION,
+        run,
+    );
+    run_phase_trace_cases(
+        &runtime,
+        &mut writer,
+        payload_contract::large_sensor_cases(),
+        CAMERA_STATIC_ALLOCATION,
+        run,
+    );
+}
+
 #[cfg(feature = "payload-contract-benchmarks")]
 async fn receive_payload_contract_ack(
     transports: &BenchTransports,
@@ -1787,6 +2106,15 @@ fn payload_contract_transported_len(
 }
 
 fn bench_transport(c: &mut Criterion) {
+    if std::env::var_os("TRANSPORT_BENCH_PHASE_TRACE").is_some() {
+        #[cfg(feature = "perf-diagnostics")]
+        {
+            run_phase_trace();
+            return;
+        }
+        #[cfg(not(feature = "perf-diagnostics"))]
+        panic!("TRANSPORT_BENCH_PHASE_TRACE requires feature perf-diagnostics");
+    }
     let _suite = BenchSuite::from_env();
     bench_payload_contract(c, BenchProfile::from_env(), BenchDiagnostic::from_env());
 }

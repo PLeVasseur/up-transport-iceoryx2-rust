@@ -27,7 +27,7 @@ fn metadata(topic: UUri) -> UFrameMetadata {
 #[tokio::test]
 async fn owned_core_carries_prepared_metadata_behind_feature() {
     let core = Iceoryx2OwnedCore::new();
-    let transport = core.clone().with_selected_wire(ProtobufWire::default());
+    let transport = core.clone().with_selected_wire(ProtobufWire);
     let frame_metadata = metadata(topic("send"));
     let frame =
         UOwnedFrame::with_payload(frame_metadata.clone(), b"owned".to_vec()).expect("owned frame");

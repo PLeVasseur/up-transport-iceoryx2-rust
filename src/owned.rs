@@ -176,9 +176,7 @@ impl UOwnedTransportCore for BenchmarkOwnedIceoryx2Core {
 }
 
 fn lease_to_encoded_owned(frame: &Iceoryx2RxLease) -> Result<EncodedOwnedFrame, UStatus> {
-    let payload = frame
-        .try_contiguous_payload()
-        .map(|payload| Bytes::copy_from_slice(payload));
+    let payload = frame.try_contiguous_payload().map(Bytes::copy_from_slice);
     Ok(EncodedOwnedFrame::new(
         frame.encoded_metadata().to_vec(),
         payload,

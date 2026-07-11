@@ -224,8 +224,8 @@ async fn external_xcdrv2_bytes_round_trip_through_real_pull_receive() {
 async fn request_receive_accepts_wildcard_source_and_exact_method_sink() {
     let _guard = iceoryx2_test_guard().await;
     let config = test_config();
-    let publisher = core(&config).with_selected_wire(ProtobufWire::default());
-    let subscriber = core(&config).with_selected_wire(ProtobufWire::default());
+    let publisher = core(&config).with_selected_wire(ProtobufWire);
+    let subscriber = core(&config).with_selected_wire(ProtobufWire);
     let authority = format!("iox-usr09i-request-{}", std::process::id());
     let reply_to = UUri::try_from_parts(&authority, 0x5BA0, 0x01, 0x0000).expect("reply-to URI");
     let method = UUri::try_from_parts(&authority, 0x5BA0, 0x01, 0x1000).expect("method URI");
