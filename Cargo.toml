@@ -25,7 +25,7 @@ harness = false
 required-features = ["payload-contract-benchmarks"]
 
 [dependencies]
-up-rust = { git = "ssh://git@github.com/PLeVasseur/up-rust.git", rev = "c4ba2590bc1ff85850f7715397bd020c18e26430", default-features = false, features = ["protobuf-wire", "selected-wire-user-api", "transport-implementer-api", "wire-implementer-api", "zero-copy-uninit"] }
+up-rust = { git = "ssh://git@github.com/PLeVasseur/up-rust.git", rev = "314bc1171d538ee22a1a874dea616d3a28d7f03c", default-features = false, features = ["protobuf-wire", "selected-wire-user-api", "transport-implementer-api", "wire-implementer-api", "zero-copy-uninit"] }
 iceoryx2 = "0.9.2"
 iceoryx2-bb-container = "0.9.2"
 iceoryx2-bb-system-types = "0.9.2"
@@ -39,7 +39,7 @@ criterion = { version = "0.5.1", features = ["csv_output"] }
 protobuf = "3.7.2"
 serde_json = "1.0.145"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "sync"] }
-up-wire-xcdrv2 = { git = "ssh://git@github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "50cc397ff9a0f2cc66a8ce9a3862fe54b476e615" }
+up-wire-xcdrv2 = { git = "ssh://git@github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "87df80e6293a0d1d85df63e7d4c6dba01378c7df" }
 
 [[test]]
 name = "iceoryx2_owned_wire"
