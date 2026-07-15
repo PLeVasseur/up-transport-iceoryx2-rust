@@ -96,7 +96,7 @@ where
 {
     match transport.receive_zero_copy(source, None).await {
         Ok(_) => panic!("subscriber unexpectedly received before send"),
-        Err(error) => assert_eq!(error.get_code(), UCode::NotFound),
+        Err(error) => assert_eq!(error.code(), UCode::NotFound),
     }
 }
 
@@ -109,7 +109,7 @@ where
         match f().await {
             Ok(value) => return Ok(value),
             Err(error) => {
-                if error.get_code() != UCode::NotFound {
+                if error.code() != UCode::NotFound {
                     return Err(error);
                 }
                 last = Some(error);
@@ -133,7 +133,7 @@ async fn receive_request_with_retry(
         {
             Ok(frame) => return Ok(frame.try_contiguous_payload().unwrap_or_default().to_vec()),
             Err(error) => {
-                if error.get_code() != UCode::NotFound {
+                if error.code() != UCode::NotFound {
                     return Err(error);
                 }
                 last = Some(error);
@@ -277,7 +277,7 @@ async fn wrong_wire_is_rejected_before_public_receive() {
             Ok(_) => panic!("wrong selected wire unexpectedly received"),
             Err(error) => error,
         };
-    assert_eq!(error.get_code(), UCode::InvalidArgument);
+    assert_eq!(error.code(), UCode::InvalidArgument);
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -312,7 +312,7 @@ async fn payload_family_mismatch_is_distinct_from_wrong_wire() {
             Ok(_) => panic!("payload-family mismatch unexpectedly received"),
             Err(error) => error,
         };
-    assert_eq!(error.get_code(), UCode::InvalidArgument);
+    assert_eq!(error.code(), UCode::InvalidArgument);
 }
 
 #[tokio::test(flavor = "multi_thread")]

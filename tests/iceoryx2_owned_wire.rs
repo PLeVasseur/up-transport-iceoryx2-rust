@@ -61,5 +61,5 @@ async fn owned_core_rejects_wrong_wire_before_exposure() {
         .receive_owned(&source, None)
         .await
         .expect_err("wrong wire rejected");
-    assert_eq!(error.get_code(), up_rust::UCode::InvalidArgument);
+    assert_eq!(error.code(), up_rust::UCode::InvalidArgument);
 }

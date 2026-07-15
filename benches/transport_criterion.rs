@@ -507,7 +507,7 @@ async fn prime_subscriber(transports: &BenchTransports, case: &BenchCase) {
         .await
     {
         Ok(frame) => drop(frame),
-        Err(status) if status.get_code() == UCode::NotFound => {}
+        Err(status) if status.code() == UCode::NotFound => {}
         Err(status) => panic!("failed to prime iceoryx2 pull subscriber: {status:?}"),
     }
 }
@@ -1857,7 +1857,7 @@ async fn receive_payload_contract_ack(
                 return ack;
             }
             Ok(_) => continue,
-            Err(status) if status.get_code() == UCode::NotFound => {
+            Err(status) if status.code() == UCode::NotFound => {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
             Err(status) => panic!("unexpected iceoryx2 payload-contract receive error: {status:?}"),
@@ -1898,7 +1898,7 @@ async fn receive_zero_copy_frame_for_filter(
         match result {
             Ok(frame) if frame.metadata().id() == expected_id => return frame,
             Ok(_) => continue,
-            Err(status) if status.get_code() == UCode::NotFound => {
+            Err(status) if status.code() == UCode::NotFound => {
                 tokio::time::sleep(Duration::from_millis(1)).await;
             }
             Err(status) => {
@@ -1922,7 +1922,7 @@ async fn exact_source_observed_once(
     .await
     {
         Ok(Ok(frame)) => frame.metadata().id() == unexpected_id,
-        Ok(Err(status)) if status.get_code() == UCode::NotFound => false,
+        Ok(Err(status)) if status.code() == UCode::NotFound => false,
         Ok(Err(status)) => {
             panic!("unexpected iceoryx2 source-prefilter probe error: {status:?}")
         }
