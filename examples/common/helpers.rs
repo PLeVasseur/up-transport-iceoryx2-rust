@@ -16,7 +16,8 @@ use up_rust::UMessage;
 /// Simply prints the [`UMessage`] instances source uri, sink uri, and payload to STDOUT
 #[allow(dead_code)]
 pub fn print_umessage(msg: &UMessage) {
-    let payload_utf8 = msg.payload.as_ref().map(|p| String::from_utf8_lossy(p));
+    let payload = msg.payload();
+    let payload_utf8 = payload.as_deref().map(String::from_utf8_lossy);
     let (source_uri, sink_uri) = get_source_and_sink_uri(msg);
     println!("Source Uri: {source_uri:?}");
     println!("Sink Uri: {sink_uri:?}");
@@ -24,15 +25,7 @@ pub fn print_umessage(msg: &UMessage) {
 }
 
 fn get_source_and_sink_uri(msg: &UMessage) -> (Option<String>, Option<String>) {
-    let source_uri = msg
-        .attributes
-        .as_ref()
-        .and_then(|a| a.source.as_ref())
-        .map(|s| s.to_uri(false));
-    let sink_uri = msg
-        .attributes
-        .as_ref()
-        .and_then(|a| a.sink.as_ref())
-        .map(|s| s.to_uri(false));
+    let source_uri = Some(msg.attributes().source().to_uri(false));
+    let sink_uri = msg.attributes().sink().map(|sink| sink.to_uri(false));
     (source_uri, sink_uri)
 }

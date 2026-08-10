@@ -12,7 +12,7 @@
 // ################################################################################
 
 use std::{error::Error, str::FromStr};
-use up_rust::{UMessage, UMessageBuilder, UPayloadFormat, UTransport, UUri};
+use up_rust::{PayloadEncoding, UMessage, UMessageBuilder, UTransport, UUri};
 use up_transport_iceoryx2_rust::{MessagingPattern, transport::UTransportIceoryx2};
 
 mod common;
@@ -20,7 +20,7 @@ use crate::common::*;
 
 fn create_umessage(source_filter: &UUri, payload: String) -> Result<UMessage, Box<dyn Error>> {
     let umessage = UMessageBuilder::publish(source_filter.clone())
-        .build_with_payload(payload.into_bytes(), UPayloadFormat::UPAYLOAD_FORMAT_TEXT)?;
+        .build_with_payload(payload.into_bytes(), PayloadEncoding::TEXT)?;
     Ok(umessage)
 }
 
@@ -34,7 +34,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         counter += 1;
         let payload = format!("Hello, from uProtocols UTransport with Iceoryx2! Message {counter}");
         let umessage = create_umessage(&source_filter, payload)?;
-        let payload_memory_address = umessage.payload.as_ref().unwrap();
+        let payload_memory_address = umessage.payload().unwrap().as_ptr();
         println!("Publishing message!");
         print_umessage(&umessage);
         println!("Payload Memory address: {payload_memory_address:p}");

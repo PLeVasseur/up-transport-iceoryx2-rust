@@ -1,300 +1,1203 @@
-// // ################################################################################
-// // Copyright (c) 2025 Contributors to the Eclipse Foundation
-// //
-// // See the NOTICE file(s) distributed with this work for additional
-// // information regarding copyright ownership.
-// //
-// // This program and the accompanying materials are made available under the
-// // terms of the Apache License Version 2.0 which is available at
-// // https: //www.apache.org/licenses/LICENSE-2.0
-// //
-// // SPDX-License-Identifier: Apache-2.0
-// // ################################################################################
+// ################################################################################
+// Copyright (c) 2026 Contributors to the Eclipse Foundation
+//
+// SPDX-License-Identifier: Apache-2.0
+// ################################################################################
 
 use async_trait::async_trait;
-use iceoryx2::prelude::{AllocationStrategy, MessagingPattern};
+use iceoryx2::port::LoanError;
+use iceoryx2::prelude::{
+    AllocationStrategy, CallbackProgression, Config, MessagingPattern, SemanticString, Service,
+};
+use iceoryx2::sample::Sample;
 use iceoryx2::sample_mut::SampleMut;
+use iceoryx2::sample_mut_uninit::SampleMutUninit;
 use iceoryx2::{
     node::{Node, NodeBuilder},
     port::{publisher::Publisher, subscriber::Subscriber},
     prelude::ServiceName,
+    service::builder::publish_subscribe::PublishSubscribeOpenError,
     service::ipc_threadsafe,
 };
-use iceoryx2_bb_container::vec::FixedSizeVec;
-use protobuf::Message;
-use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
-use up_rust::{ComparableListener, UCode, UListener, UMessage, UStatus, UTransport, UUri};
-
-use crate::UPROTOCOL_MAJOR_VERSION;
-use crate::uprotocolheader::MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH;
-use crate::workers::dispatcher::Iceoryx2WorkerDispatcher;
-use crate::{
-    ListenerMap, PublisherSet, SubscriberSet, service_name_mapping::compute_service_name,
-    uprotocolheader::UProtocolHeader,
+use iceoryx2_bb_system_types::{file_name::FileName, path::Path};
+use std::{
+    collections::{HashMap, VecDeque},
+    io::Cursor,
+    mem::MaybeUninit,
+    sync::{Arc, Mutex as StdMutex, OnceLock, Weak, atomic::AtomicBool, atomic::Ordering},
+};
+use tokio::sync::{Mutex, RwLock};
+use up_rust::selected_wire_user_api::{UNativePrefixWireTransport, UWithNativePrefixWire};
+use up_rust::transport_implementer_api::UEncodedRxFrame;
+use up_rust::wire_implementer_api::UWire;
+use up_rust::{
+    ExactUUri, LoanedPayload, PayloadLoanProvenance, PreparedTxLoanSpec, UCode,
+    UEncodedLoanedRxFrame, UEncodedZeroCopyListener, UFrameMetadata, UStatus, UTxBuffer,
+    UUninitTxBuffer, UUri, UZeroCopyTransportCore, UZeroCopyUninitTransportCore,
 };
 
-#[derive(Debug)]
+use crate::service_attributes::{attributes_match_source_filter, source_attribute_verifier};
+use crate::service_name_mapping::{
+    compute_exact_source_publish_subscribe_service_name, compute_service_name,
+};
+use crate::uprotocolheader::{
+    Iceoryx2PayloadLayout, UProtocolHeader, frame_contract_error_to_status,
+};
+use crate::workers::dispatcher::Iceoryx2WorkerDispatcher;
+
+type IpcSample = Sample<ipc_threadsafe::Service, [u8], UProtocolHeader>;
+type IpcSampleMut = SampleMut<ipc_threadsafe::Service, [u8], UProtocolHeader>;
+type IpcSampleMutUninit =
+    SampleMutUninit<ipc_threadsafe::Service, [MaybeUninit<u8>], UProtocolHeader>;
+type IpcPublisher = Publisher<ipc_threadsafe::Service, [u8], UProtocolHeader>;
+type IpcSubscriber = Subscriber<ipc_threadsafe::Service, [u8], UProtocolHeader>;
+type PublisherSet = RwLock<HashMap<ServiceName, Arc<IpcPublisher>>>;
+type SubscriberSet = RwLock<HashMap<ServiceName, Arc<IpcSubscriber>>>;
+type BroadReceiverRegistry = StdMutex<Vec<Weak<Iceoryx2PubSubInner>>>;
+
+static BROAD_RECEIVER_REGISTRY: OnceLock<BroadReceiverRegistry> = OnceLock::new();
+
+/// Real iceoryx2 selected-wire transport core.
+#[derive(Clone)]
 pub struct Iceoryx2PubSub {
+    inner: Arc<Iceoryx2PubSubInner>,
+}
+
+impl std::fmt::Debug for Iceoryx2PubSub {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Iceoryx2PubSub").finish_non_exhaustive()
+    }
+}
+
+pub(crate) struct Iceoryx2PubSubInner {
+    config: Iceoryx2PubSubConfig,
+    publishers: PublisherSet,
+    pull_subscribers: SubscriberSet,
+    pending_pull_source_filters: RwLock<Vec<UUri>>,
+    pull_receive_queue_state: Mutex<PullReceiveQueueState>,
+    zero_copy_listeners: RwLock<Vec<ZeroCopyListenerRegistration>>,
+    listener_worker_started: AtomicBool,
     node: Node<ipc_threadsafe::Service>,
-    pub publishers: PublisherSet<ipc_threadsafe::Service>,
-    pub subscribers: SubscriberSet<ipc_threadsafe::Service>,
-    pub listeners: ListenerMap,
+}
+
+#[derive(Default)]
+struct PullReceiveQueueState {
+    queues: HashMap<ServiceName, VecDeque<Iceoryx2RxLease>>,
+    dropped_mismatches: u64,
+    rejected_mismatches: u64,
+    last_mismatch_reason: Option<String>,
+}
+
+impl PullReceiveQueueState {
+    fn diagnostics(&self) -> PullMismatchQueueDiagnostics {
+        PullMismatchQueueDiagnostics {
+            current_depth: self.queues.values().map(VecDeque::len).sum(),
+            dropped_mismatches: self.dropped_mismatches,
+            rejected_mismatches: self.rejected_mismatches,
+            last_mismatch_reason: self.last_mismatch_reason.clone(),
+        }
+    }
+}
+
+struct ZeroCopyListenerRegistration {
+    source_filter: UUri,
+    sink_filter: Option<UUri>,
+    listener: Arc<dyn UEncodedZeroCopyListener<Iceoryx2RxLease>>,
+    subscribers: HashMap<ServiceName, Arc<IpcSubscriber>>,
+}
+
+impl ZeroCopyListenerRegistration {
+    fn new(
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+        listener: Arc<dyn UEncodedZeroCopyListener<Iceoryx2RxLease>>,
+    ) -> Self {
+        Self {
+            source_filter: source_filter.clone(),
+            sink_filter: sink_filter.cloned(),
+            listener,
+            subscribers: HashMap::new(),
+        }
+    }
+
+    fn has_same_identity(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+        listener: &Arc<dyn UEncodedZeroCopyListener<Iceoryx2RxLease>>,
+    ) -> bool {
+        self.source_filter == *source_filter
+            && self.sink_filter.as_ref() == sink_filter
+            && Arc::ptr_eq(&self.listener, listener)
+    }
 }
 
 impl Iceoryx2PubSub {
-    pub fn new() -> Arc<Self> {
-        let node = NodeBuilder::new()
-            .create::<ipc_threadsafe::Service>()
-            .expect("Failed to create Iceoryx2 Node");
-        let transport = Arc::new(Self {
-            node,
-            publishers: RwLock::new(HashMap::new()),
-            subscribers: RwLock::new(HashMap::new()),
-            listeners: RwLock::new(HashMap::new()),
-        });
-        Iceoryx2WorkerDispatcher::start_listener_worker(transport.clone());
-        transport
+    /// Creates a selected-wire core with the default iceoryx2 configuration.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::with_config(Iceoryx2PubSubConfig::default())
     }
 
-    pub fn create_subscriber(
+    /// Creates a selected-wire core with explicit transport configuration.
+    #[must_use]
+    pub fn with_config(config: Iceoryx2PubSubConfig) -> Self {
+        let env_config = config
+            .iceoryx2_config
+            .is_none()
+            .then(Self::env_iceoryx2_config)
+            .flatten();
+        let mut node_builder = NodeBuilder::new();
+        if let Some(iceoryx2_config) = config.iceoryx2_config.as_ref().or(env_config.as_ref()) {
+            node_builder = node_builder.config(iceoryx2_config);
+        }
+        let node = node_builder
+            .create::<ipc_threadsafe::Service>()
+            .unwrap_or_else(|error| panic!("failed to create iceoryx2 node: {error}"));
+        let inner = Arc::new(Iceoryx2PubSubInner {
+            config,
+            publishers: RwLock::new(HashMap::new()),
+            pull_subscribers: RwLock::new(HashMap::new()),
+            pending_pull_source_filters: RwLock::new(Vec::new()),
+            pull_receive_queue_state: Mutex::new(PullReceiveQueueState::default()),
+            zero_copy_listeners: RwLock::new(Vec::new()),
+            listener_worker_started: AtomicBool::new(false),
+            node,
+        });
+        Self { inner }
+    }
+
+    /// Wraps this core in the generic selected-wire adapter.
+    #[must_use]
+    pub fn with_selected_wire<W>(self, wire: W) -> UNativePrefixWireTransport<Self, W>
+    where
+        W: UWire,
+    {
+        self.into_native_prefix_wire_transport(wire)
+    }
+
+    fn env_iceoryx2_config() -> Option<Config> {
+        let root_path = std::env::var("UP_ICEORYX2_ROOT_PATH").ok();
+        let prefix = std::env::var("UP_ICEORYX2_PREFIX").ok();
+        if root_path.is_none() && prefix.is_none() {
+            return None;
+        }
+
+        let mut config = Config::default();
+        if let Some(root_path) = root_path {
+            let root_path = Path::new(root_path.as_bytes()).ok()?;
+            config.global.set_root_path(&root_path);
+        }
+        if let Some(prefix) = prefix {
+            config.global.prefix = FileName::new(prefix.as_bytes()).ok()?;
+        }
+        Some(config)
+    }
+
+    /// Returns bounded mismatch queue diagnostics for pull receive.
+    pub async fn pull_mismatch_queue_diagnostics(&self) -> PullMismatchQueueDiagnostics {
+        self.inner
+            .pull_receive_queue_state
+            .lock()
+            .await
+            .diagnostics()
+    }
+
+    /// Computes the iceoryx2 service name for a uProtocol filter pair.
+    pub fn publish_subscribe_service_name(
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+    ) -> Result<String, UStatus> {
+        compute_service_name(
+            source_filter,
+            sink_filter,
+            MessagingPattern::PublishSubscribe,
+        )
+        .map(|service_name| service_name.as_str().to_owned())
+    }
+
+    /// Computes an exact-source publish service name.
+    pub fn exact_source_publish_subscribe_service_name(
+        source: &ExactUUri,
+    ) -> Result<String, UStatus> {
+        compute_exact_source_publish_subscribe_service_name(source)
+            .map(|service_name| service_name.as_str().to_owned())
+    }
+
+    /// Lists visible iceoryx2 service names.
+    pub fn discover_service_names(&self) -> Result<Vec<String>, UStatus> {
+        self.inner.discover_service_names()
+    }
+
+    /// Lists services whose immutable source attributes match a source filter.
+    pub fn discover_matching_service_names(
+        &self,
+        source_filter: &UUri,
+    ) -> Result<Vec<String>, UStatus> {
+        self.inner.discover_matching_service_names(source_filter)
+    }
+}
+
+impl Default for Iceoryx2PubSub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl Iceoryx2PubSubInner {
+    fn create_subscriber(
         &self,
         service_name: ServiceName,
-    ) -> Result<Subscriber<ipc_threadsafe::Service, [u8], UProtocolHeader>, UStatus> {
+        source: Option<&UUri>,
+    ) -> Result<IpcSubscriber, UStatus> {
+        let builder = self
+            .node
+            .service_builder(&service_name)
+            .publish_subscribe::<[u8]>()
+            .user_header::<UProtocolHeader>();
+        let service = if let Some(source) = source {
+            builder
+                .open_or_create_with_attributes(&source_attribute_verifier(source)?)
+                .map_err(|error| {
+                    UStatus::fail_with_code(
+                        UCode::Internal,
+                        format!("failed to create iceoryx2 service: {error}"),
+                    )
+                })?
+        } else {
+            builder.open().map_err(|error| {
+                if matches!(error, PublishSubscribeOpenError::DoesNotExist) {
+                    return UStatus::fail_with_code(
+                        UCode::NotFound,
+                        format!("iceoryx2 service does not exist: {service_name}"),
+                    );
+                }
+                UStatus::fail_with_code(
+                    UCode::Internal,
+                    format!("failed to open iceoryx2 service: {error}"),
+                )
+            })?
+        };
+        service.subscriber_builder().create().map_err(|error| {
+            UStatus::fail_with_code(
+                UCode::Internal,
+                format!("failed to create iceoryx2 subscriber: {error}"),
+            )
+        })
+    }
+
+    async fn get_or_create_publisher(
+        &self,
+        service_name: ServiceName,
+        source: &UUri,
+        required_slice_len: usize,
+    ) -> Result<Arc<IpcPublisher>, UStatus> {
+        let mut publishers = self.publishers.write().await;
+        if let Some(publisher) = publishers.get(&service_name) {
+            return Ok(publisher.clone());
+        }
+
         let service = self
             .node
             .service_builder(&service_name)
             .publish_subscribe::<[u8]>()
             .user_header::<UProtocolHeader>()
-            .open_or_create()
-            .map_err(|e| {
-                UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to create service: {e}"))
+            .open_or_create_with_attributes(&source_attribute_verifier(source)?)
+            .map_err(|error| {
+                UStatus::fail_with_code(
+                    UCode::Internal,
+                    format!("failed to create iceoryx2 service: {error}"),
+                )
             })?;
-        let subscriber = service.subscriber_builder().create().map_err(|e| {
-            UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to create subscriber: {e}"))
-        })?;
+        let publisher = service
+            .publisher_builder()
+            .initial_max_slice_len(
+                self.config
+                    .publisher_initial_max_slice_len
+                    .max(required_slice_len),
+            )
+            .allocation_strategy(self.config.publisher_allocation_strategy)
+            .create()
+            .map_err(|error| {
+                UStatus::fail_with_code(
+                    UCode::Internal,
+                    format!("failed to create iceoryx2 publisher: {error}"),
+                )
+            })?;
+        let publisher = Arc::new(publisher);
+        // A dynamic publisher creates its first concrete data segment on the
+        // first loan. Materialize it before this async operation yields so a
+        // concurrently discovering receiver cannot attach to the placeholder
+        // segment and lose the first real chunk.
+        drop(
+            publisher
+                .loan_slice_uninit(required_slice_len)
+                .map_err(|error| map_loan_error(error, "prepare publisher data segment"))?,
+        );
+        publishers.insert(service_name, publisher.clone());
+        Ok(publisher)
+    }
+
+    async fn get_or_create_pull_subscriber(
+        &self,
+        service_name: ServiceName,
+        source: Option<&UUri>,
+    ) -> Result<Arc<IpcSubscriber>, UStatus> {
+        if let Some(subscriber) = self.pull_subscribers.read().await.get(&service_name) {
+            return Ok(subscriber.clone());
+        }
+        let subscriber = Arc::new(self.create_subscriber(service_name, source)?);
+        self.pull_subscribers
+            .write()
+            .await
+            .insert(service_name, subscriber.clone());
         Ok(subscriber)
     }
 
-    pub async fn get_or_create_publisher(
-        &self,
-        service_name: ServiceName,
-    ) -> Result<Arc<Publisher<ipc_threadsafe::Service, [u8], UProtocolHeader>>, UStatus> {
-        let publisher = self.get_publisher(service_name.clone()).await;
-        if let Some(publisher) = publisher {
-            return Ok(publisher);
+    async fn register_pending_pull_source_filter(&self, source_filter: &UUri) {
+        let mut source_filters = self.pending_pull_source_filters.write().await;
+        if !source_filters.iter().any(|filter| filter == source_filter) {
+            source_filters.push(source_filter.clone());
         }
-        self.create_publisher(service_name).await
     }
 
-    async fn create_publisher(
+    async fn ensure_subscribers_for_source(
         &self,
-        service_name: ServiceName,
-    ) -> Result<Arc<Publisher<ipc_threadsafe::Service, [u8], UProtocolHeader>>, UStatus> {
-        let service = self
-            .node
-            .service_builder(&service_name)
-            .publish_subscribe::<[u8]>()
-            .user_header::<UProtocolHeader>()
-            .open_or_create()
-            .map_err(|e| {
-                UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to create service: {e}"))
-            })?;
-
-        let publisher = service
-            .publisher_builder()
-            .allocation_strategy(AllocationStrategy::PowerOfTwo)
-            .create()
-            .map_err(|e| {
-                UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to create publisher: {e}"))
-            })?;
-        let mut publishers = self.publishers.write().await;
-        publishers.insert(service_name.clone(), Arc::new(publisher));
-        let publisher = publishers.get(&service_name).unwrap();
-        Ok(publisher.clone())
-    }
-
-    async fn get_publisher(
-        &self,
-        service_name: ServiceName,
-    ) -> Option<Arc<Publisher<ipc_threadsafe::Service, [u8], UProtocolHeader>>> {
-        let publishers = self.publishers.read().await;
-        if publishers.contains_key(&service_name) {
-            let publisher = publishers.get(&service_name).unwrap();
-            return Some(publisher.clone());
+        service_name: &ServiceName,
+        source: &UUri,
+    ) -> Result<(), UStatus> {
+        let pending_pull_source_filters = self.pending_pull_source_filters.read().await.clone();
+        if pending_pull_source_filters
+            .iter()
+            .any(|filter| filter.matches(source))
+        {
+            self.get_or_create_pull_subscriber(*service_name, None)
+                .await?;
         }
-        None
-    }
 
-    pub async fn relay(&self) -> Result<(), UStatus> {
-        let subscribers = self.subscribers.read().await;
-        for (service_name, subscriber) in subscribers.iter() {
-            match subscriber.receive() {
-                Ok(Some(sample)) => {
-                    let payload = sample.payload();
-                    let umessage = UMessage::parse_from_bytes(payload).map_err(|e| {
-                        UStatus::fail_with_code(
-                            UCode::INTERNAL,
-                            format!("Failed to deserialize UMessage: {}", e),
-                        )
-                    })?;
-                    if let Some(listeners_to_notify) = self.listeners.read().await.get(service_name)
-                    {
-                        for listener in listeners_to_notify.iter() {
-                            let listener: &ComparableListener = listener;
-                            let payload_clone = umessage.clone();
-                            listener.on_receive(payload_clone).await;
-                        }
-                    }
-                }
-                Ok(None) => continue, // No sample available
-                Err(e) => {
-                    return Err(UStatus::fail_with_code(
-                        UCode::INTERNAL,
-                        format!("Failed to receive sample: {e}"),
-                    ));
-                }
+        let mut registrations = self.zero_copy_listeners.write().await;
+        for registration in registrations.iter_mut() {
+            if !registration.source_filter.matches(source)
+                || registration.subscribers.contains_key(service_name)
+            {
+                continue;
             }
+            let subscriber = self.create_subscriber(*service_name, None)?;
+            registration
+                .subscribers
+                .insert(*service_name, Arc::new(subscriber));
         }
         Ok(())
     }
 
-    pub fn write_message_to_sample(
-        &self,
-        publisher: &Publisher<ipc_threadsafe::Service, [u8], UProtocolHeader>,
-        message: UMessage,
-    ) -> Result<SampleMut<ipc_threadsafe::Service, [u8], UProtocolHeader>, UStatus> {
-        let sample_size = message.compute_size();
-        let mut sample = publisher
-            .loan_slice_uninit(sample_size as usize)
-            .map_err(|e| {
-                UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to loan sample: {e}"))
-            })?;
-        let message_bytes = message
-            .write_to_bytes()
-            .map_err(|e| UStatus::fail_with_code(UCode::INTERNAL, e.to_string()))?;
-        let serialized_data = message_bytes.as_slice();
-        let user_header: &mut UProtocolHeader = sample.user_header_mut();
-        self.set_samples_user_header(user_header, message)?;
-        let sample_final = sample.write_from_slice(serialized_data);
-        Ok(sample_final)
+    fn discover_service_names(&self) -> Result<Vec<String>, UStatus> {
+        let mut services = Vec::new();
+        ipc_threadsafe::Service::list(self.node.config(), |service| {
+            services.push(service.static_details.name().as_str().to_owned());
+            CallbackProgression::Continue
+        })
+        .map_err(|error| {
+            UStatus::fail_with_code(
+                UCode::Internal,
+                format!("failed to list iceoryx2 services: {error}"),
+            )
+        })?;
+        Ok(services)
     }
 
-    fn set_samples_user_header(
+    fn discover_matching_service_names(
         &self,
-        user_header: &mut UProtocolHeader,
-        message: UMessage,
-    ) -> Result<(), UStatus> {
-        user_header.uprotocol_major_version = UPROTOCOL_MAJOR_VERSION;
-        let serialized_uattributes = message
-            .attributes
-            .write_to_bytes()
-            .map_err(|e| UStatus::fail_with_code(UCode::INTERNAL, e.to_string()))?;
-        let mut fixed_sized_vec: FixedSizeVec<u8, MAX_FEASIBLE_UATTRIBUTES_SERIALIZED_LENGTH> =
-            FixedSizeVec::new();
-        for byte in serialized_uattributes.iter() {
-            fixed_sized_vec.push(*byte);
+        source_filter: &UUri,
+    ) -> Result<Vec<String>, UStatus> {
+        let mut services = Vec::new();
+        ipc_threadsafe::Service::list(self.node.config(), |service| {
+            if attributes_match_source_filter(service.static_details.attributes(), source_filter) {
+                services.push(service.static_details.name().as_str().to_owned());
+            }
+            CallbackProgression::Continue
+        })
+        .map_err(|error| {
+            UStatus::fail_with_code(
+                UCode::Internal,
+                format!("failed to list iceoryx2 services: {error}"),
+            )
+        })?;
+        Ok(services)
+    }
+
+    async fn pop_queued_pull_sample(
+        &self,
+        service_name: &ServiceName,
+        sink_filter: Option<&UUri>,
+    ) -> Option<Iceoryx2RxLease> {
+        let mut state = self.pull_receive_queue_state.lock().await;
+        let queue = state.queues.get_mut(service_name)?;
+        let index = queue
+            .iter()
+            .position(|lease| sink_matches(lease.sink_filter_hint(), sink_filter))?;
+        let lease = queue.remove(index);
+        if queue.is_empty() {
+            state.queues.remove(service_name);
         }
-        user_header.uattributes_serialized = fixed_sized_vec;
+        lease
+    }
+
+    async fn queue_pull_sample(
+        &self,
+        service_name: ServiceName,
+        lease: Iceoryx2RxLease,
+    ) -> Result<(), UStatus> {
+        let capacity = self.config.pull_mismatch_queue_capacity;
+        let service_name_text = service_name.as_str().to_owned();
+        let mut state = self.pull_receive_queue_state.lock().await;
+        if capacity == 0 {
+            state.dropped_mismatches = state.dropped_mismatches.saturating_add(1);
+            state.last_mismatch_reason = Some(format!(
+                "dropped mismatched pull sample for {service_name_text}; capacity is 0"
+            ));
+            return Ok(());
+        }
+        let is_full = state
+            .queues
+            .get(&service_name)
+            .is_some_and(|queue| queue.len() >= capacity);
+        if is_full
+            && self.config.pull_mismatch_queue_full_policy
+                == Iceoryx2PullMismatchQueueFullPolicy::RejectNewestAndReport
+        {
+            state.rejected_mismatches = state.rejected_mismatches.saturating_add(1);
+            state.last_mismatch_reason = Some(format!(
+                "rejected newest mismatched pull sample for {service_name_text}; capacity is {capacity}"
+            ));
+            return Err(UStatus::fail_with_code(
+                UCode::ResourceExhausted,
+                format!("pull mismatch queue full for {service_name_text}; capacity is {capacity}"),
+            ));
+        }
+        let depth = {
+            let queue = state.queues.entry(service_name).or_default();
+            if is_full {
+                queue.pop_front();
+            }
+            queue.push_back(lease);
+            queue.len()
+        };
+        if is_full {
+            state.dropped_mismatches = state.dropped_mismatches.saturating_add(1);
+        }
+        state.last_mismatch_reason = Some(format!(
+            "queued mismatched pull sample for {service_name_text}; depth is {depth}"
+        ));
+        Ok(())
+    }
+
+    pub(crate) async fn relay_zero_copy_listeners(&self) -> Result<(), UStatus> {
+        self.refresh_listener_subscriptions().await?;
+        let mut received = Vec::new();
+        {
+            let registrations = self.zero_copy_listeners.read().await;
+            for registration in registrations.iter() {
+                for subscriber in registration.subscribers.values() {
+                    match subscriber.receive() {
+                        Ok(Some(sample)) => {
+                            let lease = lease_from_sample(
+                                sample,
+                                registration.source_filter.clone(),
+                                registration.sink_filter.clone(),
+                            )?;
+                            if !registration
+                                .source_filter
+                                .matches(lease.source_filter_hint())
+                                || !sink_matches(
+                                    lease.sink_filter_hint(),
+                                    registration.sink_filter.as_ref(),
+                                )
+                            {
+                                continue;
+                            }
+                            received.push((registration.listener.clone(), lease));
+                        }
+                        Ok(None) => continue,
+                        Err(error) => {
+                            return Err(UStatus::fail_with_code(
+                                UCode::Internal,
+                                format!("failed to receive iceoryx2 sample: {error}"),
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        for (listener, lease) in received {
+            listener.on_receive_encoded_zero_copy(lease).await;
+        }
+        Ok(())
+    }
+
+    async fn refresh_listener_subscriptions(&self) -> Result<(), UStatus> {
+        if self.zero_copy_listeners.read().await.is_empty() {
+            return Ok(());
+        }
+        let mut services = Vec::new();
+        ipc_threadsafe::Service::list(self.node.config(), |service| {
+            services.push((
+                *service.static_details.name(),
+                service.static_details.attributes().clone(),
+            ));
+            CallbackProgression::Continue
+        })
+        .map_err(|error| {
+            UStatus::fail_with_code(
+                UCode::Internal,
+                format!("failed to list iceoryx2 services: {error}"),
+            )
+        })?;
+        let mut registrations = self.zero_copy_listeners.write().await;
+        for registration in registrations.iter_mut() {
+            for (service_name, attributes) in &services {
+                if registration.subscribers.contains_key(service_name)
+                    || !attributes_match_source_filter(attributes, &registration.source_filter)
+                {
+                    continue;
+                }
+                let subscriber = self.create_subscriber(*service_name, None)?;
+                registration
+                    .subscribers
+                    .insert(*service_name, Arc::new(subscriber));
+            }
+        }
+        Ok(())
+    }
+}
+
+fn broad_receiver_registry() -> &'static BroadReceiverRegistry {
+    BROAD_RECEIVER_REGISTRY.get_or_init(|| StdMutex::new(Vec::new()))
+}
+
+fn register_broad_receiver(inner: &Arc<Iceoryx2PubSubInner>) {
+    let weak_inner = Arc::downgrade(inner);
+    let mut receivers = broad_receiver_registry()
+        .lock()
+        .expect("broad receiver registry lock poisoned");
+    receivers.retain(|receiver| receiver.upgrade().is_some());
+    if !receivers
+        .iter()
+        .any(|receiver| receiver.ptr_eq(&weak_inner))
+    {
+        receivers.push(weak_inner);
+    }
+}
+
+async fn notify_broad_receivers(service_name: &ServiceName, source: &UUri) -> Result<(), UStatus> {
+    let receivers = {
+        let mut receivers = broad_receiver_registry()
+            .lock()
+            .expect("broad receiver registry lock poisoned");
+        let live_receivers = receivers
+            .iter()
+            .filter_map(Weak::upgrade)
+            .collect::<Vec<_>>();
+        receivers.retain(|receiver| receiver.upgrade().is_some());
+        live_receivers
+    };
+
+    for receiver in receivers {
+        receiver
+            .ensure_subscribers_for_source(service_name, source)
+            .await?;
+    }
+    Ok(())
+}
+
+/// Policy used when the bounded pull mismatch queue reaches capacity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Iceoryx2PullMismatchQueueFullPolicy {
+    /// Drop the oldest mismatch and record it in diagnostics.
+    DropOldestAndReport,
+    /// Reject the newest mismatch and return resource exhaustion.
+    RejectNewestAndReport,
+}
+
+/// Snapshot of bounded pull mismatch queue state.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PullMismatchQueueDiagnostics {
+    pub current_depth: usize,
+    pub dropped_mismatches: u64,
+    pub rejected_mismatches: u64,
+    pub last_mismatch_reason: Option<String>,
+}
+
+/// Runtime configuration for the selected-wire core.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Iceoryx2PubSubConfig {
+    pub publisher_initial_max_slice_len: usize,
+    pub publisher_allocation_strategy: AllocationStrategy,
+    pub pull_mismatch_queue_capacity: usize,
+    pub pull_mismatch_queue_full_policy: Iceoryx2PullMismatchQueueFullPolicy,
+    pub iceoryx2_config: Option<Config>,
+}
+
+impl Default for Iceoryx2PubSubConfig {
+    fn default() -> Self {
+        Self {
+            publisher_initial_max_slice_len: 1,
+            publisher_allocation_strategy: AllocationStrategy::PowerOfTwo,
+            pull_mismatch_queue_capacity: 64,
+            pull_mismatch_queue_full_policy:
+                Iceoryx2PullMismatchQueueFullPolicy::DropOldestAndReport,
+            iceoryx2_config: None,
+        }
+    }
+}
+
+impl Iceoryx2PubSubConfig {
+    /// Uses a fixed maximum publisher slice length.
+    #[must_use]
+    pub fn static_allocation(max_slice_len: usize) -> Self {
+        Self {
+            publisher_initial_max_slice_len: max_slice_len,
+            publisher_allocation_strategy: AllocationStrategy::Static,
+            ..Self::default()
+        }
+    }
+
+    /// Sets the maximum number of mismatched pull samples retained.
+    #[must_use]
+    pub fn with_pull_mismatch_queue_capacity(mut self, value: usize) -> Self {
+        self.pull_mismatch_queue_capacity = value;
+        self
+    }
+
+    /// Sets the complete iceoryx2 runtime configuration.
+    #[must_use]
+    pub fn with_iceoryx2_config(mut self, value: Config) -> Self {
+        self.iceoryx2_config = Some(value);
+        self
+    }
+}
+
+/// Initialized iceoryx2 transmit loan.
+pub struct Iceoryx2TxLoan {
+    metadata: UFrameMetadata,
+    sample: IpcSampleMut,
+    payload_offset: usize,
+    payload_len: usize,
+    encoded_metadata_len: usize,
+}
+
+/// Uninitialized iceoryx2 transmit loan.
+pub struct Iceoryx2UninitTxLoan {
+    metadata: UFrameMetadata,
+    sample: IpcSampleMutUninit,
+    payload_offset: usize,
+    payload_len: usize,
+}
+
+/// Receive lease backed directly by a live iceoryx2 sample.
+pub struct Iceoryx2RxLease {
+    sample: IpcSample,
+    layout: Iceoryx2PayloadLayout,
+    source_filter_hint: UUri,
+    sink_filter_hint: Option<UUri>,
+}
+
+impl Iceoryx2TxLoan {
+    /// Returns the selected-wire metadata prefix in this loan.
+    #[must_use]
+    pub fn encoded_metadata(&self) -> &[u8] {
+        self.sample
+            .payload()
+            .get(..self.encoded_metadata_len)
+            .expect("prepared metadata range should be valid")
+    }
+
+    /// Returns the physical placement header.
+    #[must_use]
+    pub fn header(&self) -> UProtocolHeader {
+        *self.sample.user_header()
+    }
+}
+
+impl UTxBuffer for Iceoryx2TxLoan {
+    fn metadata(&self) -> &UFrameMetadata {
+        &self.metadata
+    }
+
+    fn payload(&self) -> &[u8] {
+        self.sample
+            .payload()
+            .get(self.payload_offset..self.payload_offset + self.payload_len)
+            .expect("loaned payload layout should be valid")
+    }
+
+    fn payload_mut(&mut self) -> &mut [u8] {
+        self.sample
+            .payload_mut()
+            .get_mut(self.payload_offset..self.payload_offset + self.payload_len)
+            .expect("loaned payload layout should be valid")
+    }
+}
+
+impl UUninitTxBuffer for Iceoryx2UninitTxLoan {
+    type Initialized = Iceoryx2TxLoan;
+
+    fn metadata(&self) -> &UFrameMetadata {
+        &self.metadata
+    }
+
+    fn payload_uninit_mut(&mut self) -> &mut [MaybeUninit<u8>] {
+        self.sample
+            .payload_mut()
+            .get_mut(self.payload_offset..self.payload_offset + self.payload_len)
+            .expect("loaned payload layout should be valid")
+    }
+
+    unsafe fn assume_payload_initialized(self) -> Self::Initialized {
+        let mut sample = self.sample;
+        let payload_end = self
+            .payload_offset
+            .checked_add(self.payload_len)
+            .expect("loaned payload layout overflow");
+        for byte in sample
+            .payload_mut()
+            .get_mut(payload_end..)
+            .expect("loaned trailing padding range should be valid")
+        {
+            byte.write(0);
+        }
+        let encoded_metadata_len = usize::try_from(sample.user_header().metadata_len).unwrap_or(0);
+        Iceoryx2TxLoan {
+            metadata: self.metadata,
+            // SAFETY: the caller guarantees the visible payload was initialized;
+            // metadata and padding were initialized by this transport.
+            sample: unsafe { sample.assume_init() },
+            payload_offset: self.payload_offset,
+            payload_len: self.payload_len,
+            encoded_metadata_len,
+        }
+    }
+}
+
+impl Iceoryx2RxLease {
+    fn source_filter_hint(&self) -> &UUri {
+        &self.source_filter_hint
+    }
+
+    fn sink_filter_hint(&self) -> Option<&UUri> {
+        self.sink_filter_hint.as_ref()
+    }
+}
+
+impl UEncodedRxFrame for Iceoryx2RxLease {
+    type PayloadReader<'a>
+        = Cursor<&'a [u8]>
+    where
+        Self: 'a;
+    type PayloadSlices<'a>
+        = std::iter::Once<&'a [u8]>
+    where
+        Self: 'a;
+
+    fn encoded_metadata(&self) -> &[u8] {
+        self.layout
+            .metadata_prefix(self.sample.payload())
+            .expect("validated metadata prefix should be valid")
+    }
+
+    fn payload_len(&self) -> usize {
+        self.layout.payload_len()
+    }
+
+    fn payload_reader(&self) -> Self::PayloadReader<'_> {
+        Cursor::new(self.try_contiguous_payload().unwrap_or_default())
+    }
+
+    fn payload_slices(&self) -> Self::PayloadSlices<'_> {
+        std::iter::once(self.try_contiguous_payload().unwrap_or_default())
+    }
+
+    fn try_contiguous_payload(&self) -> Option<&[u8]> {
+        self.layout.payload(self.sample.payload()).ok()
+    }
+}
+
+impl UEncodedLoanedRxFrame for Iceoryx2RxLease {
+    fn loaned_contiguous_payload(&self) -> Result<LoanedPayload<'_>, up_rust::UWireError> {
+        let payload = self
+            .try_contiguous_payload()
+            .ok_or_else(|| up_rust::UWireError::invalid_payload("payload is not contiguous"))?;
+        if payload.is_empty() {
+            return Err(up_rust::UWireError::MissingPayload);
+        }
+        // SAFETY: the slice is borrowed directly from the live iceoryx2 sample;
+        // no allocation, copy or coalescing is performed.
+        Ok(unsafe {
+            LoanedPayload::new_unchecked(payload, PayloadLoanProvenance::OpaqueTransportLoan)
+        })
+    }
+}
+
+#[async_trait]
+impl UZeroCopyTransportCore for Iceoryx2PubSub {
+    type Tx = Iceoryx2TxLoan;
+    type Rx = Iceoryx2RxLease;
+
+    async fn loan_prepared_tx(&self, spec: PreparedTxLoanSpec) -> Result<Self::Tx, UStatus> {
+        let payload_alignment = spec.payload_alignment_proof();
+        let (metadata, encoded_metadata, payload_len, _) = spec.into_parts();
+        let source = metadata.source();
+        let service_name =
+            compute_service_name(source, metadata.sink(), MessagingPattern::PublishSubscribe)?;
+        let alignment = payload_alignment.as_usize();
+        let sample_len =
+            worst_case_aligned_sample_len(encoded_metadata.len(), payload_len, alignment)?;
+        let publisher = self
+            .inner
+            .get_or_create_publisher(service_name, source, sample_len)
+            .await?;
+        let mut sample = publisher
+            .loan_slice(sample_len)
+            .map_err(|error| map_loan_error(error, "loan sample"))?;
+        let payload_offset = aligned_payload_offset(
+            sample.payload().as_ptr() as usize,
+            encoded_metadata.len(),
+            alignment,
+        )?;
+        let layout = Iceoryx2PayloadLayout::from_validated_parts(
+            encoded_metadata.len(),
+            payload_offset,
+            payload_len,
+            alignment,
+            sample.payload().len(),
+        )
+        .map_err(frame_contract_error_to_status)?;
+        sample
+            .payload_mut()
+            .get_mut(..encoded_metadata.len())
+            .ok_or_else(|| UStatus::fail_with_code(UCode::Internal, "metadata range missing"))?
+            .copy_from_slice(&encoded_metadata);
+        sample
+            .user_header_mut()
+            .write_payload_layout(layout)
+            .map_err(frame_contract_error_to_status)?;
+        // Dynamic publishers allocate their first data segment on loan. Attach
+        // wildcard receivers only after that segment exists so they cannot map
+        // a segment immediately superseded by the first real frame.
+        notify_broad_receivers(&service_name, source).await?;
+        Ok(Iceoryx2TxLoan {
+            metadata,
+            sample,
+            payload_offset,
+            payload_len,
+            encoded_metadata_len: encoded_metadata.len(),
+        })
+    }
+
+    async fn send_prepared_zero_copy(&self, buffer: Self::Tx) -> Result<(), UStatus> {
+        buffer.sample.send().map_err(|error| {
+            UStatus::fail_with_code(UCode::Internal, format!("failed to send sample: {error}"))
+        })?;
+        Ok(())
+    }
+
+    async fn receive_encoded_zero_copy(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+    ) -> Result<Self::Rx, UStatus> {
+        let exact_source_filter = source_filter.verify_no_wildcards().is_ok();
+        let service_names = if exact_source_filter {
+            vec![compute_service_name(
+                source_filter,
+                sink_filter,
+                MessagingPattern::PublishSubscribe,
+            )?]
+        } else {
+            self.inner
+                .register_pending_pull_source_filter(source_filter)
+                .await;
+            register_broad_receiver(&self.inner);
+            self.inner
+                .discover_matching_service_names(source_filter)?
+                .into_iter()
+                .map(|service_name| {
+                    ServiceName::new(service_name.as_str()).map_err(|error| {
+                        UStatus::fail_with_code(
+                            UCode::Internal,
+                            format!(
+                                "discovered invalid iceoryx2 service name {service_name}: {error}"
+                            ),
+                        )
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?
+        };
+
+        for service_name in service_names {
+            if let Some(lease) = self
+                .inner
+                .pop_queued_pull_sample(&service_name, sink_filter)
+                .await
+            {
+                return Ok(lease);
+            }
+
+            let subscriber = self
+                .inner
+                .get_or_create_pull_subscriber(
+                    service_name,
+                    exact_source_filter.then_some(source_filter),
+                )
+                .await?;
+            while let Some(sample) = subscriber
+                .receive()
+                .map_err(|error| UStatus::fail_with_code(UCode::Internal, error.to_string()))?
+            {
+                let lease = lease_from_sample(sample, source_filter.clone(), sink_filter.cloned())?;
+                if !sink_matches(lease.sink_filter_hint(), sink_filter) {
+                    self.inner.queue_pull_sample(service_name, lease).await?;
+                    continue;
+                }
+                return Ok(lease);
+            }
+        }
+
+        Err(UStatus::fail_with_code(
+            UCode::NotFound,
+            "no sample available",
+        ))
+    }
+
+    async fn register_encoded_zero_copy_listener(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+        listener: Arc<dyn UEncodedZeroCopyListener<Self::Rx>>,
+    ) -> Result<(), UStatus> {
+        let exact_source_filter = source_filter.verify_no_wildcards().is_ok();
+        let mut listeners = self.inner.zero_copy_listeners.write().await;
+        if listeners.iter().any(|registration| {
+            registration.has_same_identity(source_filter, sink_filter, &listener)
+        }) {
+            return Err(UStatus::fail_with_code(
+                UCode::AlreadyExists,
+                "zero-copy listener already registered for filter",
+            ));
+        }
+        let mut registration =
+            ZeroCopyListenerRegistration::new(source_filter, sink_filter, listener);
+        if exact_source_filter {
+            let service_name = compute_service_name(
+                source_filter,
+                sink_filter,
+                MessagingPattern::PublishSubscribe,
+            )?;
+            let subscriber = self
+                .inner
+                .create_subscriber(service_name, Some(source_filter))?;
+            registration
+                .subscribers
+                .insert(service_name, Arc::new(subscriber));
+        } else {
+            register_broad_receiver(&self.inner);
+        }
+        listeners.push(registration);
+        drop(listeners);
+        if !self
+            .inner
+            .listener_worker_started
+            .swap(true, Ordering::AcqRel)
+        {
+            Iceoryx2WorkerDispatcher::start_listener_worker(Arc::downgrade(&self.inner));
+        }
+        Ok(())
+    }
+
+    async fn unregister_encoded_zero_copy_listener(
+        &self,
+        source_filter: &UUri,
+        sink_filter: Option<&UUri>,
+        listener: Arc<dyn UEncodedZeroCopyListener<Self::Rx>>,
+    ) -> Result<(), UStatus> {
+        let mut listeners = self.inner.zero_copy_listeners.write().await;
+        let Some(index) = listeners.iter().position(|registration| {
+            registration.has_same_identity(source_filter, sink_filter, &listener)
+        }) else {
+            return Err(UStatus::fail_with_code(
+                UCode::NotFound,
+                "zero-copy listener not registered for filter",
+            ));
+        };
+        listeners.remove(index);
         Ok(())
     }
 }
 
 #[async_trait]
-impl UTransport for Iceoryx2PubSub {
-    /// ## DISCLAIMER
-    ///
-    /// This code is a prototype to make UMessage work with iceoryx2's ZeroCopySend system
-    ///
-    /// UMessage is not ZeroCopySend compatible as-is. If UMessages are sent
-    /// directly to an iceoryx2 publisher, it will compile. However, the
-    /// subscriber will receive a segmentation fault when receiving theUMessage
-    ///
-    /// See [ZeroCopySend's safety requirements](https://docs.rs/iceoryx2/latest/iceoryx2/prelude/trait.ZeroCopySend.html#safety) for more details.
-    ///
-    /// This essentially defeats the purpose of using iceoryx2 and
-    /// ZeroCopySend, as it copies the data into a fixed-size array and then out
-    /// of the array and back into a UMessage inside the `UTransport.send()` method
-    /// and the `UListener.on_receive()` method. The UTransport or UMessage
-    /// definition needs to be adjusted for this to truly be a zero-copy transport.
-    async fn send(&self, message: UMessage) -> Result<(), UStatus> {
-        let service_name = {
-            let source_filter = &message.attributes.source;
-            let sink_filter = message.attributes.sink.as_ref();
-            compute_service_name(
-                source_filter,
-                sink_filter,
-                MessagingPattern::PublishSubscribe,
-            )?
-        };
+impl UZeroCopyUninitTransportCore for Iceoryx2PubSub {
+    type UninitTx = Iceoryx2UninitTxLoan;
+
+    async fn loan_prepared_uninit_tx(
+        &self,
+        spec: PreparedTxLoanSpec,
+    ) -> Result<Self::UninitTx, UStatus> {
+        let payload_alignment = spec.payload_alignment_proof();
+        let (metadata, encoded_metadata, payload_len, _) = spec.into_parts();
+        let source = metadata.source();
+        let service_name =
+            compute_service_name(source, metadata.sink(), MessagingPattern::PublishSubscribe)?;
+        let alignment = payload_alignment.as_usize();
+        let sample_len =
+            worst_case_aligned_sample_len(encoded_metadata.len(), payload_len, alignment)?;
         let publisher = self
-            .get_or_create_publisher(service_name)
-            .await
-            .map_err(|e| {
-                UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to get publisher: {e}"))
-            })?;
-        let sample_final = self.write_message_to_sample(publisher.as_ref(), message)?;
-        sample_final.send().map_err(|e| {
-            UStatus::fail_with_code(UCode::INTERNAL, format!("Failed to send: {e}"))
+            .inner
+            .get_or_create_publisher(service_name, source, sample_len)
+            .await?;
+        let mut sample = publisher
+            .loan_slice_uninit(sample_len)
+            .map_err(|error| map_loan_error(error, "loan uninitialized sample"))?;
+        let payload_offset = aligned_payload_offset(
+            sample.payload_mut().as_ptr() as usize,
+            encoded_metadata.len(),
+            alignment,
+        )?;
+        let layout = Iceoryx2PayloadLayout::from_validated_parts(
+            encoded_metadata.len(),
+            payload_offset,
+            payload_len,
+            alignment,
+            sample.payload_mut().len(),
+        )
+        .map_err(frame_contract_error_to_status)?;
+        write_uninit_bytes(sample.payload_mut(), 0, &encoded_metadata)?;
+        initialize_uninit_range(sample.payload_mut(), encoded_metadata.len(), payload_offset)?;
+        sample
+            .user_header_mut()
+            .write_payload_layout(layout)
+            .map_err(frame_contract_error_to_status)?;
+        notify_broad_receivers(&service_name, source).await?;
+        Ok(Iceoryx2UninitTxLoan {
+            metadata,
+            sample,
+            payload_offset,
+            payload_len,
+        })
+    }
+}
+
+fn lease_from_sample(
+    sample: IpcSample,
+    source_filter_hint: UUri,
+    sink_filter_hint: Option<UUri>,
+) -> Result<Iceoryx2RxLease, UStatus> {
+    let layout = sample
+        .user_header()
+        .payload_layout(sample.payload().len())
+        .map_err(frame_contract_error_to_status)?;
+    validate_payload_address_alignment(
+        sample.payload(),
+        layout.payload_range().start,
+        layout.payload_alignment(),
+    )?;
+    Ok(Iceoryx2RxLease {
+        sample,
+        layout,
+        source_filter_hint,
+        sink_filter_hint,
+    })
+}
+
+fn map_loan_error(error: LoanError, operation: &str) -> UStatus {
+    let code = match error {
+        LoanError::OutOfMemory | LoanError::ExceedsMaxLoans | LoanError::ExceedsMaxLoanSize => {
+            UCode::ResourceExhausted
+        }
+        LoanError::InternalFailure => UCode::Internal,
+    };
+    UStatus::fail_with_code(code, format!("failed to {operation}: {error}"))
+}
+
+fn write_uninit_bytes(
+    sample: &mut [MaybeUninit<u8>],
+    offset: usize,
+    bytes: &[u8],
+) -> Result<(), UStatus> {
+    let end = offset.checked_add(bytes.len()).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::InvalidArgument, "sample initialization overflow")
+    })?;
+    let dst = sample.get_mut(offset..end).ok_or_else(|| {
+        UStatus::fail_with_code(
+            UCode::Internal,
+            "failed to access uninitialized sample range",
+        )
+    })?;
+    for (dst, src) in dst.iter_mut().zip(bytes) {
+        dst.write(*src);
+    }
+    Ok(())
+}
+
+fn initialize_uninit_range(
+    sample: &mut [MaybeUninit<u8>],
+    start: usize,
+    end: usize,
+) -> Result<(), UStatus> {
+    let dst = sample.get_mut(start..end).ok_or_else(|| {
+        UStatus::fail_with_code(
+            UCode::Internal,
+            "failed to access uninitialized sample range",
+        )
+    })?;
+    for byte in dst {
+        byte.write(0);
+    }
+    Ok(())
+}
+
+fn worst_case_aligned_sample_len(
+    metadata_len: usize,
+    payload_len: usize,
+    alignment: usize,
+) -> Result<usize, UStatus> {
+    metadata_len
+        .checked_add(alignment - 1)
+        .and_then(|len| len.checked_add(payload_len))
+        .ok_or_else(|| UStatus::fail_with_code(UCode::InvalidArgument, "sample length overflow"))
+}
+
+fn aligned_payload_offset(
+    payload_base: usize,
+    metadata_len: usize,
+    alignment: usize,
+) -> Result<usize, UStatus> {
+    let payload_start = payload_base.checked_add(metadata_len).ok_or_else(|| {
+        UStatus::fail_with_code(UCode::InvalidArgument, "payload address overflow")
+    })?;
+    let padding = (alignment - (payload_start & (alignment - 1))) & (alignment - 1);
+    metadata_len
+        .checked_add(padding)
+        .ok_or_else(|| UStatus::fail_with_code(UCode::InvalidArgument, "payload offset overflow"))
+}
+
+fn validate_payload_address_alignment(
+    sample_payload: &[u8],
+    payload_offset: usize,
+    alignment: usize,
+) -> Result<(), UStatus> {
+    let payload_address = (sample_payload.as_ptr() as usize)
+        .checked_add(payload_offset)
+        .ok_or_else(|| {
+            UStatus::fail_with_code(UCode::InvalidArgument, "payload address overflow")
         })?;
-        Ok(())
+    if payload_address & (alignment - 1) != 0 {
+        return Err(UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            "payload offset does not satisfy requested alignment",
+        ));
     }
+    Ok(())
+}
 
-    async fn register_listener(
-        &self,
-        source_filter: &UUri,
-        sink_filter: Option<&UUri>,
-        listener: Arc<dyn UListener>,
-    ) -> Result<(), UStatus> {
-        up_rust::verify_filter_criteria(source_filter, sink_filter)?;
-        let service_name = compute_service_name(
-            source_filter,
-            sink_filter,
-            MessagingPattern::PublishSubscribe,
-        )?;
-        let has_subscriber = {
-            let subscribers = self.subscribers.read().await;
-            subscribers.contains_key(&service_name)
-        };
-        // insert subscriber for service name if it does not already exist
-        if !has_subscriber {
-            let subscriber = self.create_subscriber(service_name.clone())?;
-            let mut subscribers = self.subscribers.write().await;
-            subscribers.insert(service_name.clone(), Arc::new(subscriber));
-        }
-        // insert listener for service name if it does not already exist
-        if !self.listeners.read().await.contains_key(&service_name) {
-            let mut listeners = self.listeners.write().await;
-            listeners
-                .entry(service_name)
-                .or_default()
-                .insert(ComparableListener::new(listener));
-        }
-        Ok(())
-    }
-
-    async fn unregister_listener(
-        &self,
-        source_filter: &UUri,
-        sink_filter: Option<&UUri>,
-        listener: Arc<dyn UListener>,
-    ) -> Result<(), UStatus> {
-        up_rust::verify_filter_criteria(source_filter, sink_filter)?;
-        let service_name = compute_service_name(
-            source_filter,
-            sink_filter,
-            MessagingPattern::PublishSubscribe,
-        )?;
-        let comparable_listener = ComparableListener::new(listener.clone());
-        let mut listeners = self.listeners.write().await;
-        if let Some(existing_listeners) = listeners.get_mut(&service_name) {
-            existing_listeners.retain(|l| !l.eq(&comparable_listener));
-            if existing_listeners.is_empty() {
-                let mut subscribers = self.subscribers.write().await;
-                subscribers.remove(&service_name);
-            }
-        }
-        Ok(())
-    }
+fn sink_matches(actual: Option<&UUri>, filter: Option<&UUri>) -> bool {
+    filter.is_none_or(|filter| actual.is_some_and(|actual| filter.matches(actual)))
 }

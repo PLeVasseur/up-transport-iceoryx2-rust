@@ -1,27 +1,53 @@
-# ################################################################################
-# Copyright (c) 2025 Contributors to the Eclipse Foundation
-# 
-# See the NOTICE file(s) distributed with this work for additional
-# information regarding copyright ownership.
-# 
-# This program and the accompanying materials are made available under the
-# terms of the Apache License Version 2.0 which is available at
-# https: //www.apache.org/licenses/LICENSE-2.0
-# 
-# SPDX-License-Identifier: Apache-2.0
-# ################################################################################
-
 [package]
 name = "up-transport-iceoryx2-rust"
 version = "0.1.0"
 edition = "2024"
+rust-version = "1.88"
+description = "iceoryx2 transport implementation for Eclipse uProtocol"
 keywords = ["uProtocol", "SDK", "communication", "iceoryx", "iceoryx2"]
+license = "Apache-2.0"
+repository = "https://github.com/eclipse-uprotocol/up-transport-iceoryx2-rust"
+resolver = "2"
+
+[features]
+default = []
+benchmark-owned = ["up-rust/owned-frame-transport"]
+payload-contract-benchmarks = ["up-rust/payload-contract-fixtures"]
+payload-contract-large-benchmarks = [
+    "payload-contract-benchmarks",
+    "up-rust/payload-contract-large-fixtures",
+]
+perf-diagnostics = [
+    "benchmark-owned",
+    "payload-contract-large-benchmarks",
+    "zero-copy",
+]
+zero-copy = []
 
 [dependencies]
-up-rust = "0.7"
 async-trait = "0.1"
-tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "signal"] }
-iceoryx2 = "0.7.0"
-iceoryx2-bb-container = "0.7.0"
+bytes = "1.10.1"
 hostname = "0.4.1"
+iceoryx2 = "=0.9.2"
+iceoryx2-bb-container = "=0.9.2"
+iceoryx2-bb-system-types = "=0.9.2"
 protobuf = "3.7.2"
+tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
+up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "7a82babfa7f94aed5b7aac1ac81babff20747bf2", default-features = false, features = ["protobuf-wire", "selected-wire-user-api", "transport-implementer-api", "wire-implementer-api", "zero-copy-transport"] }
+
+[dev-dependencies]
+criterion = { version = "0.5.1", features = ["csv_output"] }
+serde_json = "1.0.145"
+up-wire-xcdrv2 = { version = "=0.0.0", git = "https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "84cab0922b6727960d51682a6b48583110bbde61" }
+
+[[test]]
+name = "iceoryx2_owned_wire"
+required-features = ["benchmark-owned"]
+
+[package.metadata.docs.rs]
+all-features = true
+
+[[bench]]
+name = "transport_criterion"
+harness = false
+required-features = ["payload-contract-benchmarks"]
