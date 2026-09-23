@@ -151,7 +151,7 @@ async fn prepared_metadata_passes_through_for_required_wires() {
     assert_prepared_metadata::<ProtobufWire>("protobuf-prepared", PayloadEncoding::PROTOBUF).await;
     assert_prepared_metadata::<StableContainerWireFormat>(
         "stable-prepared",
-        PayloadEncoding::from_registry_entry(0x1000_0001),
+        PayloadEncoding::from_registry_entry(0xF101),
     )
     .await;
     assert_prepared_metadata::<XcdrV2Wire>(
