@@ -37,7 +37,6 @@ use up_rust::{
     UUninitTxBuffer, UUri, UZeroCopyTransportCore, UZeroCopyUninitTransportCore,
 };
 
-use crate::listener_activity::ListenerActivity;
 use crate::service_attributes::{attributes_match_source_filter, source_attribute_verifier};
 use crate::service_name_mapping::{
     compute_exact_source_publish_subscribe_service_name, compute_service_name,
@@ -46,6 +45,7 @@ use crate::uprotocolheader::{
     Iceoryx2PayloadLayout, UProtocolHeader, frame_contract_error_to_status,
 };
 use crate::workers::dispatcher::Iceoryx2WorkerDispatcher;
+use up_rust::ListenerAdmission;
 
 type IpcSample = Sample<ipc_threadsafe::Service, [u8], UProtocolHeader>;
 type IpcSampleMut = SampleMut<ipc_threadsafe::Service, [u8], UProtocolHeader>;
@@ -105,7 +105,7 @@ struct ZeroCopyListenerRegistration {
     source_filter: UUri,
     sink_filter: Option<UUri>,
     listener: Arc<dyn UEncodedZeroCopyListener<Iceoryx2RxLease>>,
-    active: Arc<ListenerActivity>,
+    active: Arc<ListenerAdmission>,
     subscribers: HashMap<ServiceName, Arc<IpcSubscriber>>,
 }
 
@@ -119,7 +119,7 @@ impl ZeroCopyListenerRegistration {
             source_filter: source_filter.clone(),
             sink_filter: sink_filter.cloned(),
             listener,
-            active: Arc::new(ListenerActivity::new()),
+            active: Arc::new(ListenerAdmission::new()),
             subscribers: HashMap::new(),
         }
     }
