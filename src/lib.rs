@@ -26,6 +26,7 @@ use tokio::sync::RwLock;
 use up_rust::ComparableListener;
 
 mod classic;
+mod listener_activity;
 #[cfg(feature = "benchmark-owned")]
 mod owned;
 pub(crate) mod service_attributes;

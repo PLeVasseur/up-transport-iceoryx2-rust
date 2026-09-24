@@ -581,3 +581,276 @@ impl UZeroCopyListener<XcdrV2Iceoryx2Rx> for CountingListener {
             .push(frame.try_contiguous_payload().unwrap_or_default().to_vec());
     }
 }
+
+struct RetainingListener(tokio::sync::mpsc::UnboundedSender<XcdrV2Iceoryx2Rx>);
+
+#[async_trait]
+impl UZeroCopyListener<XcdrV2Iceoryx2Rx> for RetainingListener {
+    async fn on_receive_zero_copy(&self, frame: XcdrV2Iceoryx2Rx) {
+        let _ = self.0.send(frame);
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn receive_lease_retains_native_storage_after_unregister_and_transport_drop() {
+    let _guard = iceoryx2_test_guard().await;
+    let config = test_config();
+    let source = topic("retained-lease");
+    let publisher = core(&config).with_selected_wire(XcdrV2Wire);
+    let subscriber = core(&config).with_selected_wire(XcdrV2Wire);
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let listener: Arc<dyn UZeroCopyListener<XcdrV2Iceoryx2Rx>> =
+        Arc::new(RetainingListener(sender));
+    subscriber
+        .register_validated_zero_copy_listener(&source, None, listener.clone())
+        .await
+        .unwrap();
+    send_payload(&publisher, source.clone(), b"retained-native-storage").await;
+    let frame = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let address = frame.try_contiguous_payload().unwrap().as_ptr();
+    subscriber
+        .unregister_validated_zero_copy_listener(&source, None, listener)
+        .await
+        .unwrap();
+    drop(subscriber);
+    drop(publisher);
+    assert_eq!(
+        frame.try_contiguous_payload().unwrap(),
+        b"retained-native-storage"
+    );
+    assert_eq!(frame.try_contiguous_payload().unwrap().as_ptr(), address);
+    assert_eq!(frame.metadata().source(), &source);
+    assert_eq!(
+        frame
+            .raw()
+            .loaned_contiguous_payload()
+            .unwrap()
+            .provenance(),
+        PayloadLoanProvenance::OpaqueTransportLoan
+    );
+}
+
+#[derive(Default)]
+struct PausedFirstListener {
+    calls: AtomicU64,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+    next: tokio::sync::Notify,
+}
+
+#[async_trait]
+impl UZeroCopyListener<XcdrV2Iceoryx2Rx> for PausedFirstListener {
+    async fn on_receive_zero_copy(&self, _frame: XcdrV2Iceoryx2Rx) {
+        if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.entered.notify_one();
+            self.resume.notified().await;
+        } else {
+            self.next.notify_one();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn unregister_invalidates_already_collected_callback_deliveries() {
+    let _guard = iceoryx2_test_guard().await;
+    let config = test_config();
+    let source = topic("unregister-snapshot");
+    let publisher = core(&config).with_selected_wire(XcdrV2Wire);
+    let subscriber = core(&config).with_selected_wire(XcdrV2Wire);
+    let first = Arc::new(PausedFirstListener::default());
+    let first_registration: Arc<dyn UZeroCopyListener<XcdrV2Iceoryx2Rx>> = first.clone();
+    let removed = Arc::new(CountingListener::default());
+    subscriber
+        .register_validated_zero_copy_listener(&source, None, first_registration.clone())
+        .await
+        .unwrap();
+    subscriber
+        .register_validated_zero_copy_listener(&source, None, removed.clone())
+        .await
+        .unwrap();
+    send_payload(&publisher, source.clone(), b"first").await;
+    tokio::time::timeout(Duration::from_secs(2), first.entered.notified())
+        .await
+        .unwrap();
+    subscriber
+        .unregister_validated_zero_copy_listener(&source, None, removed.clone())
+        .await
+        .unwrap();
+    first.resume.notify_one();
+    send_payload(&publisher, source.clone(), b"next").await;
+    tokio::time::timeout(Duration::from_secs(2), first.next.notified())
+        .await
+        .unwrap();
+    assert!(
+        removed.payloads().is_empty(),
+        "a removed registration cannot enter from a worker snapshot"
+    );
+    subscriber
+        .unregister_validated_zero_copy_listener(&source, None, first_registration)
+        .await
+        .unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_publisher_readiness_times_out_without_a_subscriber() {
+    let _guard = iceoryx2_test_guard().await;
+    let config = test_config();
+    let publisher = Iceoryx2PubSub::with_config(
+        Iceoryx2PubSubConfig::static_allocation(64 * 1024)
+            .with_iceoryx2_config(config)
+            .with_publisher_readiness(1, Duration::from_millis(30)),
+    )
+    .with_selected_wire(XcdrV2Wire);
+    let source = topic("missing-subscriber");
+    let spec = UTxLoanSpec::payload(
+        metadata(
+            source,
+            PayloadEncoding::from_registry_entry(XCDR_V2_ENCODING_ID),
+        ),
+        3,
+        1,
+    )
+    .unwrap();
+    let result = tokio::time::timeout(Duration::from_secs(2), publisher.loan_validated_tx(spec))
+        .await
+        .expect("readiness wait must be bounded");
+    let error = match result {
+        Ok(_) => panic!("a sendable loan requires the configured subscriber"),
+        Err(error) => error,
+    };
+    assert_eq!(error.code(), UCode::DeadlineExceeded);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn explicit_readiness_waits_for_actual_subscription_before_first_send() {
+    let _guard = iceoryx2_test_guard().await;
+    let config = test_config();
+    let source = topic("late-subscriber");
+    let publisher = Iceoryx2PubSub::with_config(
+        Iceoryx2PubSubConfig::static_allocation(64 * 1024)
+            .with_iceoryx2_config(config.clone())
+            .with_publisher_readiness(1, Duration::from_secs(2)),
+    )
+    .with_selected_wire(XcdrV2Wire);
+    let subscriber = core(&config).with_selected_wire(XcdrV2Wire);
+    let service_name = Iceoryx2PubSub::publish_subscribe_service_name(&source, None).unwrap();
+    let send_source = source.clone();
+    let send = tokio::spawn(async move {
+        send_payload(&publisher, send_source, b"single-first-send").await;
+        publisher
+    });
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !subscriber
+            .core()
+            .discover_service_names()
+            .unwrap()
+            .contains(&service_name)
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(
+        !send.is_finished(),
+        "the publisher must not finish before a real subscriber exists"
+    );
+    let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+    let listener: Arc<dyn UZeroCopyListener<XcdrV2Iceoryx2Rx>> =
+        Arc::new(RetainingListener(sender));
+    subscriber
+        .register_validated_zero_copy_listener(&source, None, listener.clone())
+        .await
+        .unwrap();
+    let publisher = send.await.unwrap();
+    let frame = tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        frame.try_contiguous_payload().unwrap(),
+        b"single-first-send"
+    );
+    subscriber
+        .unregister_validated_zero_copy_listener(&source, None, listener)
+        .await
+        .unwrap();
+    drop(publisher);
+}
+
+struct ReadinessPeer(std::process::Child);
+
+impl Drop for ReadinessPeer {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn publisher_readiness_waits_for_cross_process_wildcard_subscriber() {
+    let mut config = test_config();
+    if let Ok(prefix) = std::env::var("UP_ICEORYX2_READINESS_PEER_PREFIX") {
+        config.global.prefix = FileName::new(prefix.as_bytes()).unwrap();
+        let subscriber = core(&config).with_selected_wire(XcdrV2Wire);
+        let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+        let listener: Arc<dyn UZeroCopyListener<XcdrV2Iceoryx2Rx>> =
+            Arc::new(RetainingListener(sender));
+        subscriber
+            .register_validated_zero_copy_listener(&UUri::any(), None, listener.clone())
+            .await
+            .unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            frame.try_contiguous_payload().unwrap(),
+            b"one cross-process send"
+        );
+        subscriber
+            .unregister_validated_zero_copy_listener(&UUri::any(), None, listener)
+            .await
+            .unwrap();
+        return;
+    }
+    let _guard = iceoryx2_test_guard().await;
+    let source = topic("cross-process-ready");
+    let publisher = Iceoryx2PubSub::with_config(
+        Iceoryx2PubSubConfig::static_allocation(64 * 1024)
+            .with_iceoryx2_config(config.clone())
+            .with_publisher_readiness(1, Duration::from_secs(5)),
+    )
+    .with_selected_wire(XcdrV2Wire);
+    let mut peer = ReadinessPeer(
+        std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "publisher_readiness_waits_for_cross_process_wildcard_subscriber",
+                "--nocapture",
+            ])
+            .env(
+                "UP_ICEORYX2_READINESS_PEER_PREFIX",
+                std::str::from_utf8(config.global.prefix.as_bytes()).unwrap(),
+            )
+            .spawn()
+            .unwrap(),
+    );
+    // There is no same-process receiver to notify and history remains zero.
+    // The single send can succeed only after native discovery of the child.
+    send_payload(&publisher, source, b"one cross-process send").await;
+    let exit = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(exit) = peer.0.try_wait().unwrap() {
+                break exit;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("peer must receive the first send and exit");
+    assert!(exit.success());
+}

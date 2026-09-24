@@ -12,6 +12,7 @@ use iceoryx2::prelude::{
 use iceoryx2::sample::Sample;
 use iceoryx2::sample_mut::SampleMut;
 use iceoryx2::sample_mut_uninit::SampleMutUninit;
+use iceoryx2::service::port_factory::PortFactory as _;
 use iceoryx2::{
     node::{Node, NodeBuilder},
     port::{publisher::Publisher, subscriber::Subscriber},
@@ -36,6 +37,7 @@ use up_rust::{
     UUninitTxBuffer, UUri, UZeroCopyTransportCore, UZeroCopyUninitTransportCore,
 };
 
+use crate::listener_activity::ListenerActivity;
 use crate::service_attributes::{attributes_match_source_filter, source_attribute_verifier};
 use crate::service_name_mapping::{
     compute_exact_source_publish_subscribe_service_name, compute_service_name,
@@ -103,6 +105,7 @@ struct ZeroCopyListenerRegistration {
     source_filter: UUri,
     sink_filter: Option<UUri>,
     listener: Arc<dyn UEncodedZeroCopyListener<Iceoryx2RxLease>>,
+    active: Arc<ListenerActivity>,
     subscribers: HashMap<ServiceName, Arc<IpcSubscriber>>,
 }
 
@@ -116,6 +119,7 @@ impl ZeroCopyListenerRegistration {
             source_filter: source_filter.clone(),
             sink_filter: sink_filter.cloned(),
             listener,
+            active: Arc::new(ListenerActivity::new()),
             subscribers: HashMap::new(),
         }
     }
@@ -354,6 +358,52 @@ impl Iceoryx2PubSubInner {
         Ok(subscriber)
     }
 
+    async fn wait_for_publisher_subscribers(
+        &self,
+        service_name: &ServiceName,
+    ) -> Result<(), UStatus> {
+        let required = self.config.publisher_min_subscribers;
+        if required == 0 {
+            return Ok(());
+        }
+        let service = self
+            .node
+            .service_builder(service_name)
+            .publish_subscribe::<[u8]>()
+            .user_header::<UProtocolHeader>()
+            .open()
+            .map_err(|error| {
+                UStatus::fail_with_code(
+                    UCode::Unavailable,
+                    format!("cannot inspect publisher readiness: {error}"),
+                )
+            })?;
+        let deadline = tokio::time::Instant::now()
+            .checked_add(self.config.publisher_readiness_timeout)
+            .ok_or_else(|| {
+                UStatus::fail_with_code(
+                    UCode::InvalidArgument,
+                    "publisher readiness timeout overflows the monotonic clock",
+                )
+            })?;
+        loop {
+            let observed = service.dynamic_config().number_of_subscribers();
+            if observed >= required {
+                return Ok(());
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(UStatus::fail_with_code(
+                    UCode::DeadlineExceeded,
+                    format!(
+                        "iceoryx2 publisher discovery timed out: {observed} subscribers, required {required}"
+                    ),
+                ));
+            }
+            tokio::time::sleep(remaining.min(std::time::Duration::from_millis(10))).await;
+        }
+    }
+
     async fn register_pending_pull_source_filter(&self, source_filter: &UUri) {
         let mut source_filters = self.pending_pull_source_filters.write().await;
         if !source_filters.iter().any(|filter| filter == source_filter) {
@@ -515,7 +565,11 @@ impl Iceoryx2PubSubInner {
                             {
                                 continue;
                             }
-                            received.push((registration.listener.clone(), lease));
+                            received.push((
+                                registration.listener.clone(),
+                                registration.active.clone(),
+                                lease,
+                            ));
                         }
                         Ok(None) => continue,
                         Err(error) => {
@@ -528,8 +582,10 @@ impl Iceoryx2PubSubInner {
                 }
             }
         }
-        for (listener, lease) in received {
-            listener.on_receive_encoded_zero_copy(lease).await;
+        for (listener, active, lease) in received {
+            active
+                .dispatch(|| listener.on_receive_encoded_zero_copy(lease))
+                .await;
         }
         Ok(())
     }
@@ -635,6 +691,11 @@ pub struct Iceoryx2PubSubConfig {
     pub pull_mismatch_queue_capacity: usize,
     pub pull_mismatch_queue_full_policy: Iceoryx2PullMismatchQueueFullPolicy,
     pub iceoryx2_config: Option<Config>,
+    /// Minimum actual subscribers required before a TX loan becomes sendable.
+    /// Zero preserves ordinary publish-without-a-peer behavior.
+    pub publisher_min_subscribers: usize,
+    /// Bounded discovery wait when `publisher_min_subscribers` is nonzero.
+    pub publisher_readiness_timeout: std::time::Duration,
 }
 
 impl Default for Iceoryx2PubSubConfig {
@@ -646,11 +707,27 @@ impl Default for Iceoryx2PubSubConfig {
             pull_mismatch_queue_full_policy:
                 Iceoryx2PullMismatchQueueFullPolicy::DropOldestAndReport,
             iceoryx2_config: None,
+            publisher_min_subscribers: 0,
+            publisher_readiness_timeout: std::time::Duration::from_secs(5),
         }
     }
 }
 
 impl Iceoryx2PubSubConfig {
+    /// Requires actual subscriber discovery before returning a TX loan. This is
+    /// useful for finite senders and cross-process wildcard subscriptions; it
+    /// does not use retransmission or change retained-history policy.
+    #[must_use]
+    pub fn with_publisher_readiness(
+        mut self,
+        minimum: usize,
+        timeout: std::time::Duration,
+    ) -> Self {
+        self.publisher_min_subscribers = minimum;
+        self.publisher_readiness_timeout = timeout;
+        self
+    }
+
     /// Uses a fixed maximum publisher slice length.
     #[must_use]
     pub fn static_allocation(max_slice_len: usize) -> Self {
@@ -884,6 +961,9 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
         // wildcard receivers only after that segment exists so they cannot map
         // a segment immediately superseded by the first real frame.
         notify_broad_receivers(&service_name, source).await?;
+        self.inner
+            .wait_for_publisher_subscribers(&service_name)
+            .await?;
         Ok(Iceoryx2TxLoan {
             metadata,
             sample,
@@ -1028,6 +1108,7 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
                 "zero-copy listener not registered for filter",
             ));
         };
+        listeners[index].active.stop().await;
         listeners.remove(index);
         Ok(())
     }
@@ -1076,6 +1157,9 @@ impl UZeroCopyUninitTransportCore for Iceoryx2PubSub {
             .write_payload_layout(layout)
             .map_err(frame_contract_error_to_status)?;
         notify_broad_receivers(&service_name, source).await?;
+        self.inner
+            .wait_for_publisher_subscribers(&service_name)
+            .await?;
         Ok(Iceoryx2UninitTxLoan {
             metadata,
             sample,
