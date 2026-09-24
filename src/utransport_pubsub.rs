@@ -714,6 +714,39 @@ impl Default for Iceoryx2PubSubConfig {
 }
 
 impl Iceoryx2PubSubConfig {
+    /// Selects a native namespace for this instance without changing process globals.
+    ///
+    /// Use distinct prefixes for independent buses, including endpoints represented
+    /// by different logical uProtocol authorities in a bridge process.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` for an invalid native root path or file prefix.
+    pub fn with_namespace(mut self, root_path: &str, prefix: &str) -> Result<Self, UStatus> {
+        if !std::path::Path::new(root_path).is_absolute() || prefix.is_empty() {
+            return Err(UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                "iceoryx2 namespace requires an absolute root path and nonempty prefix",
+            ));
+        }
+        let root = Path::new(root_path.as_bytes()).map_err(|error| {
+            UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                format!("invalid iceoryx2 root path: {error:?}"),
+            )
+        })?;
+        let prefix = FileName::new(prefix.as_bytes()).map_err(|error| {
+            UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                format!("invalid iceoryx2 namespace prefix: {error:?}"),
+            )
+        })?;
+        let mut config = self.iceoryx2_config.take().unwrap_or_default();
+        config.global.set_root_path(&root);
+        config.global.prefix = prefix;
+        self.iceoryx2_config = Some(config);
+        Ok(self)
+    }
+
     /// Requires actual subscriber discovery before returning a TX loan. This is
     /// useful for finite senders and cross-process wildcard subscriptions; it
     /// does not use retransmission or change retained-history policy.

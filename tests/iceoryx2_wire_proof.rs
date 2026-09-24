@@ -783,6 +783,77 @@ async fn explicit_readiness_waits_for_actual_subscription_before_first_send() {
 
 struct ReadinessPeer(std::process::Child);
 
+#[tokio::test(flavor = "multi_thread")]
+async fn per_instance_namespaces_isolate_identical_logical_topics() {
+    let _guard = iceoryx2_test_guard().await;
+    let config = test_config();
+    let suffix = std::str::from_utf8(config.global.prefix.as_bytes()).unwrap();
+    let root =
+        std::path::PathBuf::from(std::env::var("UP_ICEORYX2_TEST_ROOT").unwrap_or_else(|_| {
+            format!("{}/target/r19-iceoryx2-runtime", env!("CARGO_MANIFEST_DIR"))
+        }));
+    let local = Iceoryx2PubSub::with_config(
+        Iceoryx2PubSubConfig::static_allocation(65536)
+            .with_namespace(root.to_str().unwrap(), &format!("a_{suffix}"))
+            .unwrap(),
+    )
+    .with_selected_wire(XcdrV2Wire);
+    let remote = Iceoryx2PubSub::with_config(
+        Iceoryx2PubSubConfig::static_allocation(65536)
+            .with_namespace(root.to_str().unwrap(), &format!("b_{suffix}"))
+            .unwrap(),
+    )
+    .with_selected_wire(XcdrV2Wire);
+    let source = topic("isolated-topic");
+    prime_subscriber(&local, &source).await;
+    prime_subscriber(&remote, &source).await;
+    send_payload(&local, source.clone(), b"requires a bridge").await;
+    let own = receive_with_retry(|| local.receive_validated_zero_copy(&source, None))
+        .await
+        .unwrap();
+    assert_eq!(own.try_contiguous_payload().unwrap(), b"requires a bridge");
+    assert_eq!(
+        remote
+            .receive_validated_zero_copy(&source, None)
+            .await
+            .unwrap_err()
+            .code(),
+        UCode::NotFound
+    );
+    send_payload(
+        &remote,
+        source.clone(),
+        own.try_contiguous_payload().unwrap(),
+    )
+    .await;
+    let forwarded = receive_with_retry(|| remote.receive_validated_zero_copy(&source, None))
+        .await
+        .unwrap();
+    assert_eq!(
+        forwarded.try_contiguous_payload().unwrap(),
+        b"requires a bridge"
+    );
+}
+
+#[test]
+fn native_namespace_rejects_invalid_inputs() {
+    assert!(
+        Iceoryx2PubSubConfig::default()
+            .with_namespace("relative", "prefix_")
+            .is_err()
+    );
+    assert!(
+        Iceoryx2PubSubConfig::default()
+            .with_namespace("/absolute", "bad/prefix")
+            .is_err()
+    );
+    assert!(
+        Iceoryx2PubSubConfig::default()
+            .with_namespace("/absolute", "")
+            .is_err()
+    );
+}
+
 impl Drop for ReadinessPeer {
     fn drop(&mut self) {
         let _ = self.0.kill();

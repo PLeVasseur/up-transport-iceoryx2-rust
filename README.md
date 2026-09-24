@@ -26,6 +26,13 @@ there is no fixed stabilization delay or duplicate application send. The default
 minimum is zero, preserving ordinary publish-without-a-peer semantics and existing
 history policy. This is transport discovery, not an application acknowledgement.
 
+`Iceoryx2PubSubConfig::with_namespace(root_path, prefix)` selects a checked native
+namespace for one instance without changing process-wide environment variables.
+A bridge must use distinct native prefixes for independent ingress/egress buses;
+different uProtocol authorities alone do not provide that isolation. Multiple
+instances in one process may use different namespaces and carry identical
+logical source/sink URIs while remaining physically separate.
+
 Real IPC tests default to `target/r19-iceoryx2-runtime`. Set
 `UP_ICEORYX2_TEST_ROOT` to a shorter persistent path when validating from a
 deep package extraction directory.
