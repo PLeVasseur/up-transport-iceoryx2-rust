@@ -792,7 +792,40 @@ impl Drop for ReadinessPeer {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn publisher_readiness_waits_for_cross_process_wildcard_subscriber() {
+    cross_process_first_send(
+        "publisher_readiness_waits_for_cross_process_wildcard_subscriber",
+        b"one cross-process send",
+        false,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_publisher_delivers_a_large_first_sample_across_processes() {
+    cross_process_first_send(
+        "dynamic_publisher_delivers_a_large_first_sample_across_processes",
+        &vec![0x5a; 2312],
+        true,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn dynamic_publisher_delivers_a_large_first_request_across_processes() {
+    cross_process_first_send(
+        "dynamic_publisher_delivers_a_large_first_request_across_processes",
+        &vec![0x5a; 2312],
+        true,
+        true,
+    )
+    .await;
+}
+
+async fn cross_process_first_send(test_name: &str, payload: &[u8], dynamic: bool, rpc: bool) {
     let mut config = test_config();
+    let sink = rpc.then(|| UUri::try_from_parts("readiness-service", 0x4210, 1, 0x1000).unwrap());
     if let Ok(prefix) = std::env::var("UP_ICEORYX2_READINESS_PEER_PREFIX") {
         config.global.prefix = FileName::new(prefix.as_bytes()).unwrap();
         let subscriber = core(&config).with_selected_wire(XcdrV2Wire);
@@ -800,38 +833,52 @@ async fn publisher_readiness_waits_for_cross_process_wildcard_subscriber() {
         let listener: Arc<dyn UZeroCopyListener<XcdrV2Iceoryx2Rx>> =
             Arc::new(RetainingListener(sender));
         subscriber
-            .register_validated_zero_copy_listener(&UUri::any(), None, listener.clone())
+            .register_validated_zero_copy_listener(&UUri::any(), sink.as_ref(), listener.clone())
             .await
             .unwrap();
         let frame = tokio::time::timeout(Duration::from_secs(5), receiver.recv())
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(
-            frame.try_contiguous_payload().unwrap(),
-            b"one cross-process send"
-        );
+        assert_eq!(frame.try_contiguous_payload().unwrap(), payload);
         subscriber
-            .unregister_validated_zero_copy_listener(&UUri::any(), None, listener)
+            .unregister_validated_zero_copy_listener(&UUri::any(), sink.as_ref(), listener)
             .await
             .unwrap();
         return;
     }
     let _guard = iceoryx2_test_guard().await;
     let source = topic("cross-process-ready");
-    let publisher = Iceoryx2PubSub::with_config(
+    let allocation = if dynamic {
+        Iceoryx2PubSubConfig::default()
+    } else {
         Iceoryx2PubSubConfig::static_allocation(64 * 1024)
+    };
+    let publisher = Iceoryx2PubSub::with_config(
+        allocation
             .with_iceoryx2_config(config.clone())
             .with_publisher_readiness(1, Duration::from_secs(5)),
     )
     .with_selected_wire(XcdrV2Wire);
+    if rpc {
+        // Model the bridge's reverse route. It is interested in replies from
+        // the service, not requests to it, and must not satisfy TX readiness.
+        let reverse_source =
+            UUri::try_from_parts("readiness-service", u32::MAX, u8::MAX, u16::MAX).unwrap();
+        let reverse_sink =
+            UUri::try_from_parts(source.authority_name(), u32::MAX, u8::MAX, u16::MAX).unwrap();
+        publisher
+            .register_validated_zero_copy_listener(
+                &reverse_source,
+                Some(&reverse_sink),
+                Arc::new(CountingListener::default()),
+            )
+            .await
+            .unwrap();
+    }
     let mut peer = ReadinessPeer(
         std::process::Command::new(std::env::current_exe().unwrap())
-            .args([
-                "--exact",
-                "publisher_readiness_waits_for_cross_process_wildcard_subscriber",
-                "--nocapture",
-            ])
+            .args(["--exact", test_name, "--nocapture"])
             .env(
                 "UP_ICEORYX2_READINESS_PEER_PREFIX",
                 std::str::from_utf8(config.global.prefix.as_bytes()).unwrap(),
@@ -841,7 +888,24 @@ async fn publisher_readiness_waits_for_cross_process_wildcard_subscriber() {
     );
     // There is no same-process receiver to notify and history remains zero.
     // The single send can succeed only after native discovery of the child.
-    send_payload(&publisher, source, b"one cross-process send").await;
+    if let Some(method) = sink {
+        let metadata = UFrameMetadata::request(
+            method,
+            source.clone_with_resource_id(0),
+            Duration::from_secs(5),
+        )
+        .with_payload_encoding(PayloadEncoding::from_registry_entry(XCDR_V2_ENCODING_ID))
+        .build()
+        .unwrap();
+        let mut loan = publisher
+            .loan_validated_tx(UTxLoanSpec::payload(metadata, payload.len(), 8).unwrap())
+            .await
+            .unwrap();
+        loan.payload_mut().copy_from_slice(payload);
+        publisher.send_validated_zero_copy(loan).await.unwrap();
+    } else {
+        send_payload(&publisher, source, payload).await;
+    }
     let exit = tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             if let Some(exit) = peer.0.try_wait().unwrap() {
