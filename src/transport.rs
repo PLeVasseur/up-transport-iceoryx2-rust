@@ -13,7 +13,7 @@
 
 use std::sync::Arc;
 
-use crate::utransport_pubsub::Iceoryx2PubSub;
+use crate::classic::Iceoryx2PubSub;
 use iceoryx2::prelude::MessagingPattern;
 use up_rust::{UCode, UStatus, UTransport};
 
@@ -24,7 +24,7 @@ impl UTransportIceoryx2 {
         match messaging_pattern {
             MessagingPattern::PublishSubscribe => Ok(UTransportIceoryx2::build_publish_subscribe()),
             _ => Err(UStatus::fail_with_code(
-                UCode::UNIMPLEMENTED,
+                UCode::Unimplemented,
                 "Unimplemented messaging pattern",
             )),
         }

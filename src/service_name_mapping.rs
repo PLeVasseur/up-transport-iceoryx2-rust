@@ -1,18 +1,11 @@
 // ################################################################################
-// Copyright (c) 2025 Contributors to the Eclipse Foundation
-//
-// See the NOTICE file(s) distributed with this work for additional
-// information regarding copyright ownership.
-//
-// This program and the accompanying materials are made available under the
-// terms of the Apache License Version 2.0 which is available at
-// https: //www.apache.org/licenses/LICENSE-2.0
+// Copyright (c) 2026 Contributors to the Eclipse Foundation
 //
 // SPDX-License-Identifier: Apache-2.0
 // ################################################################################
 
 use iceoryx2::prelude::{MessagingPattern, ServiceName};
-use up_rust::{UCode, UMessageType, UStatus, UUri};
+use up_rust::{ExactUUri, UCode, UMessageType, UStatus, UUri};
 
 fn encode_uuri_segments(uuri: &UUri) -> Vec<String> {
     vec![
@@ -24,149 +17,152 @@ fn encode_uuri_segments(uuri: &UUri) -> Vec<String> {
     ]
 }
 
-fn encode_hex(value: u32) -> String {
+pub(crate) fn encode_hex(value: u32) -> String {
     format!("{value:X}")
 }
 
-fn get_authority_name(source_uuri: &UUri) -> String {
-    if source_uuri.authority_name.is_empty() {
-        match hostname::get().unwrap().into_string() {
-            Ok(hostname) => hostname,
-            Err(_) => "unknown".to_string(),
-        }
+pub(crate) fn get_authority_name(source_uuri: &UUri) -> String {
+    if source_uuri.authority_name().is_empty() {
+        hostname::get()
+            .ok()
+            .and_then(|hostname| hostname.into_string().ok())
+            .unwrap_or_else(|| "unknown".to_string())
     } else {
-        source_uuri.authority_name.clone()
+        source_uuri.authority_name().to_string()
     }
 }
 
 fn determine_message_type(
     source: &UUri,
-    _sink: Option<&UUri>,
+    sink: Option<&UUri>,
     messaging_pattern: MessagingPattern,
 ) -> Result<UMessageType, UStatus> {
-    if is_a_publish(source, messaging_pattern) {
-        return Ok(UMessageType::UMESSAGE_TYPE_PUBLISH);
+    if messaging_pattern == MessagingPattern::PublishSubscribe {
+        return match sink {
+            Some(sink) if source.is_rpc_response() && sink.is_rpc_method() => {
+                Ok(UMessageType::Request)
+            }
+            Some(sink) if source.is_rpc_method() && sink.is_rpc_response() => {
+                Ok(UMessageType::Response)
+            }
+            Some(sink) if source.is_event() && sink.is_notification_destination() => {
+                Ok(UMessageType::Notification)
+            }
+            None if !source.authority_name().is_empty() => Ok(UMessageType::Publish),
+            _ => Err(UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                "could not determine a valid UMessageType from the provided UUri(s)",
+            )),
+        };
     }
 
     Err(UStatus::fail_with_code(
-        UCode::INVALID_ARGUMENT,
-        "Could not determine a valid UMessageType from the provided UUri(s)",
+        UCode::InvalidArgument,
+        "could not determine a valid UMessageType from the provided UUri(s)",
     ))
 }
 
-fn is_a_publish(source: &UUri, messaging_pattern: MessagingPattern) -> bool {
-    !source.is_empty() && messaging_pattern == MessagingPattern::PublishSubscribe
-}
-
-pub fn compute_service_name(
+pub(crate) fn compute_service_name(
     source: &UUri,
     sink: Option<&UUri>,
     messaging_pattern: MessagingPattern,
 ) -> Result<ServiceName, UStatus> {
     let join_segments = |segments: Vec<String>| segments.join("/");
     let message_type = determine_message_type(source, sink, messaging_pattern)?;
-    let service_name_str = match message_type {
-        UMessageType::UMESSAGE_TYPE_REQUEST => {
-            let Some(sink_uri) = sink else {
+    let service_name = match message_type {
+        UMessageType::Request => {
+            let Some(sink) = sink else {
                 return Err(UStatus::fail_with_code(
-                    UCode::INVALID_ARGUMENT,
-                    format!(
-                        "sink required for UMessageType {:?}",
-                        UMessageType::UMESSAGE_TYPE_REQUEST
-                    ),
+                    UCode::InvalidArgument,
+                    "sink required for request service name",
                 ));
             };
-            let segments = encode_uuri_segments(sink_uri);
-            format!("up/{}", join_segments(segments))
+            format!("up/{}", join_segments(encode_uuri_segments(sink)))
         }
-        UMessageType::UMESSAGE_TYPE_RESPONSE | UMessageType::UMESSAGE_TYPE_NOTIFICATION => {
-            let Some(sink_uri) = sink else {
+        UMessageType::Response | UMessageType::Notification => {
+            let Some(sink) = sink else {
                 return Err(UStatus::fail_with_code(
-                    UCode::INVALID_ARGUMENT,
-                    format!(
-                        "sink required for UMessageType {:?} or {:?}",
-                        UMessageType::UMESSAGE_TYPE_RESPONSE,
-                        UMessageType::UMESSAGE_TYPE_NOTIFICATION
-                    ),
+                    UCode::InvalidArgument,
+                    "sink required for response or notification service name",
                 ));
             };
-            let source_segments = encode_uuri_segments(source);
-            let sink_segments = encode_uuri_segments(sink_uri);
             format!(
                 "up/{}/{}",
-                join_segments(source_segments),
-                join_segments(sink_segments)
+                join_segments(encode_uuri_segments(source)),
+                join_segments(encode_uuri_segments(sink))
             )
         }
-        UMessageType::UMESSAGE_TYPE_PUBLISH => {
-            let segments = encode_uuri_segments(source);
-            format!("up/{}", join_segments(segments))
-        }
-        _ => {
-            return Err(UStatus::fail_with_code(
-                UCode::INVALID_ARGUMENT,
-                "Unsupported UMessageType for service name computation",
-            ));
-        }
+        UMessageType::Publish => format!("up/{}", join_segments(encode_uuri_segments(source))),
     };
-    Ok(ServiceName::new(service_name_str.as_str()).expect("Failed to create service name"))
+    ServiceName::new(service_name.as_str()).map_err(|error| {
+        UStatus::fail_with_code(
+            UCode::InvalidArgument,
+            format!("invalid iceoryx2 service name {service_name}: {error}"),
+        )
+    })
+}
+
+pub(crate) fn compute_exact_source_publish_subscribe_service_name(
+    source: &ExactUUri,
+) -> Result<ServiceName, UStatus> {
+    compute_service_name(source.as_uuri(), None, MessagingPattern::PublishSubscribe)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use iceoryx2::prelude::MessagingPattern;
-    use up_rust::{UCode, UUri};
 
     fn test_uri(authority: &str, instance: u16, typ: u16, version: u8, resource: u16) -> UUri {
         let entity_id = ((instance as u32) << 16) | (typ as u32);
         UUri::try_from_parts(authority, entity_id, version, resource).unwrap()
     }
 
-    // performing successful tests for service name computation
-
     #[test]
-    // [specitem,oft-sid="dsn~up-transport-iceoryx2-service-name~1",oft-needs="utest"]
-    fn test_publish_service_name() {
-        let source = test_uri("device1", 0x0000, 0x10AB, 0x03, 0x7FFF);
-
+    fn publish_service_name_uses_source_uri() {
+        let source = test_uri("device1", 0, 0x10ab, 3, 0x7fff);
         let name = compute_service_name(&source, None, MessagingPattern::PublishSubscribe).unwrap();
-        assert_eq!(name, "up/device1/10AB/0/3/7FFF");
-    }
-
-    // performing failing tests for service name computation
-
-    #[test]
-    // .specitem[dsn~up-attributes-request-source~1]
-    // .specitem[dsn~up-attributes-response-source~1]
-    // .specitem[dsn~up-attributes-notification-source~1]
-    fn test_missing_uri_error() {
-        let uuri = UUri::new();
-        let result = compute_service_name(&uuri, None, MessagingPattern::PublishSubscribe);
-
-        assert!(result.is_err());
-        assert_eq!(result.unwrap_err().get_code(), UCode::INVALID_ARGUMENT);
+        assert_eq!(name.as_str(), "up/device1/10AB/0/3/7FFF");
     }
 
     #[test]
-    //source has resource id=0 but missing sink
-    // .specitem[dsn~up-attributes-request-sink~1]
-    // .specitem[dsn~up-attributes-request-source~1]
-    fn test_fail_missing_sink_error() {
-        let source = test_uri("device1", 0x0000, 0x00CD, 0x04, 0x000);
-        let result = compute_service_name(&source, None, MessagingPattern::RequestResponse);
-        assert!(result.is_err_and(|err| err.get_code() == UCode::INVALID_ARGUMENT));
+    fn request_service_name_uses_sink_method_uri() {
+        let reply_to = test_uri("client", 0, 0x10ab, 3, 0x0000);
+        let method = test_uri("service", 0, 0x20bc, 1, 0x1000);
+        let name =
+            compute_service_name(&reply_to, Some(&method), MessagingPattern::PublishSubscribe)
+                .unwrap();
+        assert_eq!(name.as_str(), "up/service/20BC/0/1/1000");
     }
 
     #[test]
-    //missing source URI
-    // .specitem[dsn~up-attributes-request-source~1]
-    // .specitem[dsn~up-attributes-response-source~1]
-    // .specitem[dsn~up-attributes-notification-source~1]
-    fn test_fail_missing_source_error() {
-        let uuri = UUri::new();
-        let sink = test_uri("device1", 0x0004, 0x3AB, 0x3, 0x000);
-        let result = compute_service_name(&uuri, Some(&sink), MessagingPattern::PublishSubscribe);
-        assert!(result.is_err_and(|err| err.get_code() == UCode::INVALID_ARGUMENT));
+    fn response_service_name_uses_source_and_sink_uri() {
+        let method = test_uri("service", 0, 0x20bc, 1, 0x1000);
+        let reply_to = test_uri("client", 0, 0x10ab, 3, 0x0000);
+        let name =
+            compute_service_name(&method, Some(&reply_to), MessagingPattern::PublishSubscribe)
+                .unwrap();
+        assert_eq!(name.as_str(), "up/service/20BC/0/1/1000/client/10AB/0/3/0");
+    }
+
+    #[test]
+    fn notification_service_name_uses_source_and_sink_uri() {
+        let source = test_uri("device1", 0, 0x10ab, 3, 0x8000);
+        let sink = test_uri("client", 0, 0x20bc, 1, 0x0000);
+        let name =
+            compute_service_name(&source, Some(&sink), MessagingPattern::PublishSubscribe).unwrap();
+        assert_eq!(name.as_str(), "up/device1/10AB/0/3/8000/client/20BC/0/1/0");
+    }
+
+    #[test]
+    fn exact_publish_service_name_requires_exact_source_proof() {
+        let source = ExactUUri::try_from(test_uri("device1", 0, 0x10ab, 3, 0x7fff)).unwrap();
+        let name = compute_exact_source_publish_subscribe_service_name(&source).unwrap();
+        assert_eq!(name.as_str(), "up/device1/10AB/0/3/7FFF");
+    }
+
+    #[test]
+    fn exact_publish_service_name_rejects_wildcard_source_before_mapping() {
+        let wildcard = UUri::try_from_parts("device1", 0x10ab, 3, 0xffff).unwrap();
+        assert!(ExactUUri::try_from(wildcard).is_err());
     }
 }
