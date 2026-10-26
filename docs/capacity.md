@@ -1,0 +1,46 @@
+# Exact native service capacities
+
+Ordinary `Iceoryx2PubSubConfig` retains the middleware's default open/create and
+publisher-growth behavior. For a deployment with a fixed memory budget, set
+`require_exact_service_limits = true`, provide the native configuration and use
+`Iceoryx2PubSub::try_with_config` for typed setup errors.
+
+The native configuration supplies `max_subscribers`,
+`subscriber_max_buffer_size`, `subscriber_max_borrowed_samples`,
+`publisher_history_size`, `publisher_max_loaned_samples` and overflow policy.
+Exact mode checks nonzero subscriber/buffer/borrow/TX/slice values, readiness
+against the subscriber ceiling, and checked slot/minimum-byte arithmetic before
+creating the node. `InvalidArgument` and `OutOfRange` distinguish invalid values
+from arithmetic overflow. Native node failures return `Internal`.
+
+Before creating a subscriber or publisher port, exact mode compares the opened
+service's actual subscriber ceiling, buffer, borrowed-sample, history and overflow
+settings against the node's configured values. Any difference returns
+`FailedPrecondition`, including an existing service with a *larger* ceiling.
+It does not rewrite the service or attach a port to an incompatible deployment.
+Every participant must provision compatible settings and an isolated namespace.
+
+With static allocation, `publisher_initial_max_slice_len` is a hard capacity from
+the first loan in exact mode. An oversized request returns `ResourceExhausted`
+instead of enlarging the first publisher allocation. The slice includes encoded
+metadata, alignment slack and payload; compute it using the selected codec and
+actual message options. The user header and native management allocations are
+additional physical storage. Dynamic strategies retain their configured growth
+behavior; exact service ceilings alone do not promise a fixed dynamic byte pool.
+
+The pinned middleware's publisher sample budget is
+`max_subscribers * (buffer + borrowed) + history + TX loans`. For example,
+one subscriber, buffer2, borrowed2, history0 and TX1 require five slots per
+publisher. This is neither a consumer application-queue limit nor a process RSS
+prediction. A second subscriber cannot join a one-subscriber service; diagnostics
+must not consume the sole receiver slot. Allocator failure is an error, not an
+application backpressure/drop allowance. Existing callback quiescence and
+retained-sample ownership contracts remain independent.
+
+One subscriber is a deployment example, not a transport restriction. The native
+default remains eight subscribers, and exact mode accepts larger configured
+ceilings. Two subscribers with buffer2/borrowed2/history0/TX1 need nine publisher
+slots; both can retain independent loans to a publication. Different virtual
+mapping addresses do not imply payload copies. Unregistering or destroying one
+subscriber never revokes the other's retained sample. Native tests cover fan-out,
+independent retained loans and rejection only beyond the configured ceiling.

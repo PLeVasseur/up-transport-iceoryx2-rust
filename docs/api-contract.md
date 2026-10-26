@@ -45,3 +45,11 @@ oldest samples, rejected newest samples and the latest mismatch diagnostic.
 See [listener lifecycle](listener-lifecycle.md) for quiescence and retained sample
 ownership. Public items, example targets and test harnesses are checked with
 `missing_docs = "deny"`; strict Rustdoc/doctests are part of the same owner checks.
+
+## Exact capacity configuration
+
+`Iceoryx2PubSubConfig::validate` and `Iceoryx2PubSub::try_with_config` check opt-in
+exact capacity settings and report typed failures. The `require_exact_service_limits`
+field defaults to false; enabling it compares actual native service limits and
+makes static slice capacity a hard bound from the first loan. The
+[capacity guide](capacity.md) defines these contracts and their ownership boundary.

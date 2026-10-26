@@ -144,8 +144,23 @@ impl Iceoryx2PubSub {
     }
 
     /// Creates a selected-wire core with explicit transport configuration.
+    ///
+    /// # Panics
+    /// Panics if configuration or native node creation fails. Use
+    /// [`Self::try_with_config`] for a typed failure instead.
     #[must_use]
     pub fn with_config(config: Iceoryx2PubSubConfig) -> Self {
+        Self::try_with_config(config)
+            .unwrap_or_else(|error| panic!("failed to create iceoryx2 node: {error}"))
+    }
+
+    /// Creates a selected-wire core after validating its explicit capacity contract.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` for invalid strict limits, `OutOfRange` for
+    /// capacity arithmetic overflow, or `Internal` if native node creation fails.
+    pub fn try_with_config(config: Iceoryx2PubSubConfig) -> Result<Self, UStatus> {
+        config.validate()?;
         let env_config = config
             .iceoryx2_config
             .is_none()
@@ -157,7 +172,12 @@ impl Iceoryx2PubSub {
         }
         let node = node_builder
             .create::<ipc_threadsafe::Service>()
-            .unwrap_or_else(|error| panic!("failed to create iceoryx2 node: {error}"));
+            .map_err(|error| {
+                UStatus::fail_with_code(
+                    UCode::Internal,
+                    format!("failed to create iceoryx2 node: {error}"),
+                )
+            })?;
         let inner = Arc::new(Iceoryx2PubSubInner {
             config,
             publishers: RwLock::new(HashMap::new()),
@@ -168,7 +188,7 @@ impl Iceoryx2PubSub {
             listener_worker_started: AtomicBool::new(false),
             node,
         });
-        Self { inner }
+        Ok(Self { inner })
     }
 
     /// Wraps this core in the generic selected-wire adapter.
@@ -249,6 +269,28 @@ impl Default for Iceoryx2PubSub {
 }
 
 impl Iceoryx2PubSubInner {
+    fn verify_service_limits(
+        &self,
+        actual: &iceoryx2::service::static_config::publish_subscribe::StaticConfig,
+    ) -> Result<(), UStatus> {
+        if !self.config.require_exact_service_limits {
+            return Ok(());
+        }
+        let expected = &self.node.config().defaults.publish_subscribe;
+        if actual.max_subscribers() != expected.max_subscribers
+            || actual.subscriber_max_buffer_size() != expected.subscriber_max_buffer_size
+            || actual.subscriber_max_borrowed_samples() != expected.subscriber_max_borrowed_samples
+            || actual.history_size() != expected.publisher_history_size
+            || actual.has_safe_overflow() != expected.enable_safe_overflow
+        {
+            return Err(UStatus::fail_with_code(
+                UCode::FailedPrecondition,
+                "existing iceoryx2 service does not match the exact subscriber/buffer/borrow/history/overflow contract",
+            ));
+        }
+        Ok(())
+    }
+
     fn create_subscriber(
         &self,
         service_name: ServiceName,
@@ -282,6 +324,7 @@ impl Iceoryx2PubSubInner {
                 )
             })?
         };
+        self.verify_service_limits(service.static_config())?;
         service.subscriber_builder().create().map_err(|error| {
             UStatus::fail_with_code(
                 UCode::Internal,
@@ -296,6 +339,18 @@ impl Iceoryx2PubSubInner {
         source: &UUri,
         required_slice_len: usize,
     ) -> Result<Arc<IpcPublisher>, UStatus> {
+        if self.config.require_exact_service_limits
+            && self.config.publisher_allocation_strategy == AllocationStrategy::Static
+            && required_slice_len > self.config.publisher_initial_max_slice_len
+        {
+            return Err(UStatus::fail_with_code(
+                UCode::ResourceExhausted,
+                format!(
+                    "required sample length {required_slice_len} exceeds fixed publisher capacity {}",
+                    self.config.publisher_initial_max_slice_len
+                ),
+            ));
+        }
         let mut publishers = self.publishers.write().await;
         if let Some(publisher) = publishers.get(&service_name) {
             return Ok(publisher.clone());
@@ -313,6 +368,7 @@ impl Iceoryx2PubSubInner {
                     format!("failed to create iceoryx2 service: {error}"),
                 )
             })?;
+        self.verify_service_limits(service.static_config())?;
         let publisher = service
             .publisher_builder()
             .initial_max_slice_len(
@@ -690,6 +746,13 @@ pub struct PullMismatchQueueDiagnostics {
 /// Runtime configuration for the selected-wire core.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Iceoryx2PubSubConfig {
+    /// Requires exact native subscriber/buffer/borrow/history/overflow settings
+    /// when opening a service. Defaults to false for ordinary open compatibility.
+    ///
+    /// Requires explicit `iceoryx2_config` and nonzero, nonoverflowing capacities.
+    /// With static allocation, the configured slice length is also a hard bound
+    /// from the first loan. Mismatched services are never attached or rewritten.
+    pub require_exact_service_limits: bool,
     /// Initial publish-loan capacity before the chosen allocation strategy grows it.
     pub publisher_initial_max_slice_len: usize,
     /// iceoryx2 allocation strategy for publish loans.
@@ -716,6 +779,7 @@ pub struct Iceoryx2PubSubConfig {
 impl Default for Iceoryx2PubSubConfig {
     fn default() -> Self {
         Self {
+            require_exact_service_limits: false,
             publisher_initial_max_slice_len: 1,
             publisher_allocation_strategy: AllocationStrategy::PowerOfTwo,
             pull_mismatch_queue_capacity: 64,
@@ -730,6 +794,60 @@ impl Default for Iceoryx2PubSubConfig {
 }
 
 impl Iceoryx2PubSubConfig {
+    /// Validates opt-in exact capacity settings without creating native resources.
+    ///
+    /// Ordinary configurations retain the middleware's existing interpretation.
+    /// Strict configurations require an explicit native configuration, nonzero
+    /// subscriber/buffer/borrow/TX/slice limits and a readiness minimum no greater
+    /// than the subscriber ceiling. Slot and minimum byte arithmetic is checked;
+    /// this is not an allocator-overhead or physical-memory availability estimate.
+    ///
+    /// # Errors
+    /// Returns `InvalidArgument` for missing/zero/incompatible limits and
+    /// `OutOfRange` if the configured slot or minimum byte count overflows.
+    pub fn validate(&self) -> Result<(), UStatus> {
+        if !self.require_exact_service_limits {
+            return Ok(());
+        }
+        let native = self.iceoryx2_config.as_ref().ok_or_else(|| {
+            UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                "exact service limits require explicit native configuration",
+            )
+        })?;
+        let limits = &native.defaults.publish_subscribe;
+        if self.publisher_initial_max_slice_len == 0
+            || limits.max_subscribers == 0
+            || limits.subscriber_max_buffer_size == 0
+            || limits.subscriber_max_borrowed_samples == 0
+            || limits.publisher_max_loaned_samples == 0
+            || self.publisher_min_subscribers > limits.max_subscribers
+        {
+            return Err(UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                "exact service capacities must be nonzero and readiness must fit the subscriber ceiling",
+            ));
+        }
+        let slots = limits
+            .subscriber_max_buffer_size
+            .checked_add(limits.subscriber_max_borrowed_samples)
+            .and_then(|value| value.checked_mul(limits.max_subscribers))
+            .and_then(|value| value.checked_add(limits.publisher_history_size))
+            .and_then(|value| value.checked_add(limits.publisher_max_loaned_samples));
+        let minimum_bytes = slots.and_then(|slots| {
+            self.publisher_initial_max_slice_len
+                .checked_add(std::mem::size_of::<UProtocolHeader>())
+                .and_then(|sample| sample.checked_mul(slots))
+        });
+        if minimum_bytes.is_none() {
+            return Err(UStatus::fail_with_code(
+                UCode::OutOfRange,
+                "iceoryx2 slot or sample-byte capacity overflows usize",
+            ));
+        }
+        Ok(())
+    }
+
     /// Selects a native namespace for this instance without changing process globals.
     ///
     /// Use distinct prefixes for independent buses, including endpoints represented

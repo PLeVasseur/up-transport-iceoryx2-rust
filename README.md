@@ -8,6 +8,12 @@ See the [listener lifecycle guide](docs/listener-lifecycle.md) for configuration
 
 ## Transport APIs
 
+Fixed-budget deployments can opt into exact native service limits and hard static
+first-loan capacity through `Iceoryx2PubSubConfig::require_exact_service_limits`.
+Use `Iceoryx2PubSub::try_with_config` for typed setup errors. See the
+[capacity guide](docs/capacity.md) for participant compatibility, slot accounting
+and the distinction between physical pools and application receive queues.
+
 The [public API and placement guide](docs/api-contract.md) explains header/layout
 fields and mismatch diagnostics. Public documentation uses `missing_docs = "deny"`.
 `UProtocolHeader::reserved` explicitly occupies bytes1–7 and must be zero. Header
