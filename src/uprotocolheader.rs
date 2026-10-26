@@ -17,6 +17,9 @@ use up_rust::{UCode, UStatus};
 pub struct UProtocolHeader {
     /// Physical header version, compared with the binding's supported major version.
     pub uprotocol_major_version: u8,
+    /// Reserved bytes at offsets 1–7, written as zero and rejected if nonzero.
+    /// These explicit bytes replace padding without changing the header ABI.
+    pub reserved: [u8; 7],
     /// Length in bytes of the encoded metadata prefix in the sample byte region.
     pub metadata_len: u64,
     /// Offset from the sample byte-region start to its visible payload.
@@ -33,6 +36,7 @@ impl UProtocolHeader {
         layout: Iceoryx2PayloadLayout,
     ) -> Result<(), FrameContractError> {
         self.uprotocol_major_version = crate::UPROTOCOL_MAJOR_VERSION;
+        self.reserved = [0; 7];
         self.metadata_len = u64::try_from(layout.metadata_len)
             .map_err(|_| FrameContractError::FieldTooLarge("metadata_len"))?;
         self.payload_offset = u64::try_from(layout.payload_offset)
@@ -52,6 +56,9 @@ impl UProtocolHeader {
             return Err(FrameContractError::UnsupportedMajorVersion(
                 self.uprotocol_major_version,
             ));
+        }
+        if self.reserved != [0; 7] {
+            return Err(FrameContractError::NonZeroReservedBytes);
         }
         Iceoryx2PayloadLayout::validate(
             usize::try_from(self.metadata_len)
@@ -201,6 +208,7 @@ pub(crate) enum FrameContractError {
         required_len: usize,
     },
     UnsupportedMajorVersion(u8),
+    NonZeroReservedBytes,
 }
 
 impl fmt::Display for FrameContractError {
@@ -229,6 +237,9 @@ impl fmt::Display for FrameContractError {
             Self::UnsupportedMajorVersion(version) => {
                 write!(f, "unsupported uProtocol major version {version}")
             }
+            Self::NonZeroReservedBytes => {
+                f.write_str("iceoryx2 reserved header bytes must be zero")
+            }
         }
     }
 }
@@ -242,6 +253,36 @@ pub(crate) fn frame_contract_error_to_status(error: impl fmt::Display) -> UStatu
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn header_has_explicit_padding_and_preserves_its_physical_abi() {
+        use std::mem::{align_of, offset_of, size_of};
+        assert_eq!(size_of::<UProtocolHeader>(), 40);
+        assert_eq!(align_of::<UProtocolHeader>(), 8);
+        assert_eq!(offset_of!(UProtocolHeader, uprotocol_major_version), 0);
+        assert_eq!(offset_of!(UProtocolHeader, reserved), 1);
+        assert_eq!(offset_of!(UProtocolHeader, metadata_len), 8);
+        assert_eq!(offset_of!(UProtocolHeader, payload_offset), 16);
+        assert_eq!(offset_of!(UProtocolHeader, payload_len), 24);
+        assert_eq!(offset_of!(UProtocolHeader, payload_alignment), 32);
+        let mut header = UProtocolHeader {
+            reserved: [0xff; 7],
+            ..Default::default()
+        };
+        let layout = Iceoryx2PayloadLayout::from_validated_parts(3, 8, 7, 8, 15).unwrap();
+        header.write_payload_layout(layout).unwrap();
+        assert_eq!(header.reserved, [0; 7]);
+        assert_eq!(
+            header.uprotocol_major_version,
+            crate::UPROTOCOL_MAJOR_VERSION
+        );
+        assert!(header.payload_layout(15).is_ok());
+        header.reserved[6] = 1;
+        assert_eq!(
+            header.payload_layout(15),
+            Err(FrameContractError::NonZeroReservedBytes)
+        );
+    }
 
     #[test]
     fn payload_offset_length_and_alignment_are_explicit() {

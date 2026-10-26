@@ -20,11 +20,11 @@ use iceoryx2_bb_system_types::{file_name::FileName, path::Path};
 use tokio::sync::{Mutex as TokioMutex, MutexGuard};
 use up_rust::selected_wire_user_api::UNativePrefixWireTransport;
 use up_rust::{
-    ExactUUri, NATIVE_PREFIX_METADATA_LAYOUT_ID, NativePrefixFrameMetadataCodec,
-    PROTOBUF_PAYLOAD_FAMILY_ID, PayloadEncoding, PayloadLoanProvenance, ProtobufWire,
-    StableContainerWireFormat, UCode, UEncodedLoanedRxFrame, UFrameMetadata, UFrameView, UStatus,
-    UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UWire, UWireMetadataCodec, UZeroCopyListener,
-    UZeroCopyTransportImpl, UZeroCopyUninitTransportImpl, WireIdentity, XCDR_V2_WIRE_ID,
+    ExactUUri, NativePrefixFrameMetadataCodec, PROTOBUF_PAYLOAD_FAMILY_ID, PayloadEncoding,
+    PayloadLoanProvenance, ProtobufWire, UCode, UEncodedLoanedRxFrame, UFrameMetadata, UFrameView,
+    UStatus, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UWire, UWireMetadataCodec,
+    UZeroCopyListener, UZeroCopyTransportImpl, UZeroCopyUninitTransportImpl, WireIdentity,
+    XCDR_V2_WIRE_ID,
 };
 use up_transport_iceoryx2_rust::{Iceoryx2PubSub, Iceoryx2PubSubConfig, UProtocolHeader};
 use up_wire_xcdrv2::{VEHICLE_SIGNAL_V1_GOLDEN_BYTES, XCDR_V2_PAYLOAD_ENCODING, XcdrV2Wire};
@@ -149,22 +149,56 @@ async fn receive_request_with_retry(
 #[tokio::test(flavor = "multi_thread")]
 async fn prepared_metadata_passes_through_for_required_wires() {
     let _guard = iceoryx2_test_guard().await;
-    assert_prepared_metadata::<ProtobufWire>("protobuf-prepared", PayloadEncoding::PROTOBUF).await;
-    assert_prepared_metadata::<StableContainerWireFormat>(
-        "stable-prepared",
-        PayloadEncoding::private_use(0xF101),
+    assert_prepared_metadata(
+        core(&test_config()).with_selected_wire(ProtobufWire),
+        metadata(topic("protobuf-prepared"), PayloadEncoding::PROTOBUF),
     )
     .await;
-    assert_prepared_metadata::<XcdrV2Wire>("xcdr-prepared", XCDR_V2_PAYLOAD_ENCODING).await;
+
+    #[repr(C)]
+    #[derive(up_rust::StablePayload)]
+    #[stable_payload(type_name = "test.PreparedBytes", revision = 1)]
+    struct PreparedBytes {
+        bytes: [u8; 4],
+    }
+    let representation = <PreparedBytes as up_rust::StablePayload>::native_representation();
+    let profile = up_rust::NativeProfile::new(
+        "iceoryx2.prepared",
+        1,
+        up_rust::NativeProfileMode::Table(
+            up_rust::NativeProfileTable::new(vec![(
+                PayloadEncoding::private_use(0xF101),
+                representation.clone(),
+            )])
+            .unwrap(),
+        ),
+    )
+    .unwrap();
+    let agreement =
+        up_rust::NativeProfileAgreement::new(Arc::new(profile.clone()), &profile).unwrap();
+    let native_metadata = UFrameMetadata::publish(topic("stable-prepared"))
+        .with_native_payload_identity(agreement.identity_for(&representation).unwrap())
+        .build()
+        .unwrap();
+    let native = up_rust::UWithNativePrefixWire::into_stable_container_transport(
+        core(&test_config()),
+        agreement,
+    );
+    assert_prepared_metadata(native, native_metadata).await;
+
+    assert_prepared_metadata(
+        core(&test_config()).with_selected_wire(XcdrV2Wire),
+        metadata(topic("xcdr-prepared"), XCDR_V2_PAYLOAD_ENCODING),
+    )
+    .await;
 }
 
-async fn assert_prepared_metadata<W>(test_name: &str, payload_encoding: PayloadEncoding)
-where
-    W: UWire + Default + Send + Sync + 'static,
+async fn assert_prepared_metadata<W>(
+    transport: NativeIceoryx2Transport<W>,
+    frame_metadata: UFrameMetadata,
+) where
+    W: UWire + Send + Sync + 'static,
 {
-    let config = test_config();
-    let transport = core(&config).with_selected_wire(W::default());
-    let frame_metadata = metadata(topic(test_name), payload_encoding);
     let mut tx = transport
         .loan_validated_tx(UTxLoanSpec::payload(frame_metadata.clone(), 4, 1).expect("loan spec"))
         .await
@@ -177,7 +211,10 @@ where
     );
     assert_eq!(tx.header().payload_len, 4);
     let decoded = NativePrefixFrameMetadataCodec
-        .decode_frame_metadata(W::metadata_context(), tx.encoded_metadata())
+        .decode_frame_metadata(
+            up_rust::UWireMetadataContext::from_wire::<W, NativePrefixFrameMetadataCodec>(),
+            tx.encoded_metadata(),
+        )
         .expect("decode");
     assert_eq!(decoded, frame_metadata);
 }
@@ -284,7 +321,6 @@ struct XcdrWireWrongPayloadFamily;
 impl UWire for XcdrWireWrongPayloadFamily {
     const WIRE_ID: WireIdentity = XCDR_V2_WIRE_ID;
     const PAYLOAD_FAMILY_ID: WireIdentity = PROTOBUF_PAYLOAD_FAMILY_ID;
-    const METADATA_LAYOUT_ID: WireIdentity = NATIVE_PREFIX_METADATA_LAYOUT_ID;
     const FORMAT_VERSION: u16 = XcdrV2Wire::FORMAT_VERSION;
 }
 
@@ -493,6 +529,7 @@ async fn malformed_metadata_is_rejected_before_public_receive() {
     sample.payload_mut().copy_from_slice(&[0xff, 0x00, 0x01]);
     *sample.user_header_mut() = UProtocolHeader {
         uprotocol_major_version: 0,
+        reserved: [0; 7],
         metadata_len: 3,
         payload_offset: 3,
         payload_len: 0,

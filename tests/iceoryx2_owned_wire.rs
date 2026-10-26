@@ -9,7 +9,7 @@ use bytes::Bytes;
 use up_rust::transport_implementer_api::EncodedOwnedFrame;
 use up_rust::{
     NativePrefixFrameMetadataCodec, PayloadEncoding, ProtobufWire, UFrameMetadata, UOwnedFrame,
-    UOwnedTransport, UUri, UWire, UWireMetadataCodec,
+    UOwnedTransport, UUri, UWireMetadataCodec,
 };
 use up_transport_iceoryx2_rust::Iceoryx2OwnedCore;
 
@@ -36,9 +36,16 @@ async fn owned_core_carries_prepared_metadata_behind_feature() {
     transport.send_owned(frame).await.expect("send owned");
 
     let sent = core.last_sent().await.expect("sent frame");
-    let decoded = NativePrefixFrameMetadataCodec
-        .decode_frame_metadata(ProtobufWire::metadata_context(), sent.encoded_metadata())
-        .expect("decode");
+    let decoded =
+        NativePrefixFrameMetadataCodec
+            .decode_frame_metadata(
+                up_rust::UWireMetadataContext::from_wire::<
+                    ProtobufWire,
+                    NativePrefixFrameMetadataCodec,
+                >(),
+                sent.encoded_metadata(),
+            )
+            .expect("decode");
     assert_eq!(decoded, frame_metadata);
     assert_eq!(sent.payload(), Some(&b"owned"[..]));
 }
@@ -47,9 +54,16 @@ async fn owned_core_carries_prepared_metadata_behind_feature() {
 async fn owned_core_rejects_wrong_wire_before_exposure() {
     let source = topic("wrong-wire");
     let metadata = metadata(source.clone());
-    let encoded = NativePrefixFrameMetadataCodec
-        .encode_frame_metadata(ProtobufWire::metadata_context(), &metadata)
-        .expect("encode");
+    let encoded =
+        NativePrefixFrameMetadataCodec
+            .encode_frame_metadata(
+                up_rust::UWireMetadataContext::from_wire::<
+                    ProtobufWire,
+                    NativePrefixFrameMetadataCodec,
+                >(),
+                &metadata,
+            )
+            .expect("encode");
     let core = Iceoryx2OwnedCore::new();
     core.push_encoded_owned(EncodedOwnedFrame::new(
         encoded,

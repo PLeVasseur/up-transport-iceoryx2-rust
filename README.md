@@ -10,6 +10,10 @@ See the [listener lifecycle guide](docs/listener-lifecycle.md) for configuration
 
 The [public API and placement guide](docs/api-contract.md) explains header/layout
 fields and mismatch diagnostics. Public documentation uses `missing_docs = "deny"`.
+`UProtocolHeader::reserved` explicitly occupies bytes1–7 and must be zero. Header
+writers initialize it; receivers reject nonzero values. Raw producers initialize
+the new field while the40-byte, alignment8 ABI and physical major version remain
+unchanged. The guide lists every offset and a checked construction example.
 
 `UTransportIceoryx2` preserves the classic protobuf-serialized `UTransport`
 entry point. `Iceoryx2PubSub` is the real shared-memory selected-wire core. Wrap

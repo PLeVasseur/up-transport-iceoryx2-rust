@@ -955,11 +955,12 @@ impl UEncodedLoanedRxFrame for Iceoryx2RxLease {
         if payload.is_empty() {
             return Err(up_rust::UWireError::MissingPayload);
         }
-        // SAFETY: the slice is borrowed directly from the live iceoryx2 sample;
+        // The slice is borrowed directly from the live iceoryx2 sample;
         // no allocation, copy or coalescing is performed.
-        Ok(unsafe {
-            LoanedPayload::new_unchecked(payload, PayloadLoanProvenance::OpaqueTransportLoan)
-        })
+        Ok(LoanedPayload::new(
+            payload,
+            PayloadLoanProvenance::OpaqueTransportLoan,
+        ))
     }
 }
 
