@@ -58,7 +58,7 @@ pub struct Iceoryx2RouteReservation {
 struct Endpoint {
     definition: Iceoryx2RouteReservation,
     name: ServiceName,
-    publisher: Arc<NativePublisher>,
+    publisher: Option<Arc<NativePublisher>>,
     notifier: Arc<NativeNotifier>,
     sample_len: usize,
 }
@@ -204,6 +204,45 @@ impl Iceoryx2PreparedCore {
         route_capacity: usize,
         registration_capacity: usize,
     ) -> Result<Self, UStatus> {
+        Self::new_masked(config, catalog, None, route_capacity, registration_capacity)
+    }
+
+    /// Reserves physical services with an explicit per-address TX capability.
+    ///
+    /// A false mask entry permits native receive/attach but creates no publisher
+    /// or data segment and rejects TX reservation. True entries eagerly reserve
+    /// the same static pools and limits as [`Self::new`]. Call during setup; no
+    /// publisher is ever created by loan, publish or the receive callback.
+    ///
+    /// # Errors
+    /// Rejects a mask length differing from the catalog and all invalid setup
+    /// accepted by neither this constructor nor [`Self::new`].
+    pub fn new_with_transmit_mask(
+        config: Iceoryx2PubSubConfig,
+        catalog: &[Iceoryx2RouteReservation],
+        transmit: &[bool],
+        route_capacity: usize,
+        registration_capacity: usize,
+    ) -> Result<Self, UStatus> {
+        if transmit.len() != catalog.len() {
+            return Err(setup_error("transmit mask must match catalog"));
+        }
+        Self::new_masked(
+            config,
+            catalog,
+            Some(transmit),
+            route_capacity,
+            registration_capacity,
+        )
+    }
+
+    fn new_masked(
+        config: Iceoryx2PubSubConfig,
+        catalog: &[Iceoryx2RouteReservation],
+        transmit: Option<&[bool]>,
+        route_capacity: usize,
+        registration_capacity: usize,
+    ) -> Result<Self, UStatus> {
         config.validate()?;
         if config.publisher_allocation_strategy != AllocationStrategy::Static || catalog.is_empty()
         {
@@ -224,7 +263,7 @@ impl Iceoryx2PreparedCore {
         endpoints
             .try_reserve_exact(catalog.len())
             .map_err(|_| setup_error("catalog allocation failed"))?;
-        for definition in catalog {
+        for (index, definition) in catalog.iter().enumerate() {
             definition
                 .source
                 .verify_no_wildcards()
@@ -251,46 +290,53 @@ impl Iceoryx2PreparedCore {
                 definition.sink.as_ref(),
                 MessagingPattern::PublishSubscribe,
             )?;
-            let (publisher, notifier) = if let Some(previous) =
-                endpoints.iter().find(|entry| entry.name == name)
-            {
-                (
-                    Arc::clone(&previous.publisher),
-                    Arc::clone(&previous.notifier),
-                )
-            } else {
-                // Request services are addressed by method, not client identity.
-                // Semantic source/sink filtering remains in the SDK worker.
-                let service = node
-                    .service_builder(&name)
-                    .publish_subscribe::<[u8]>()
-                    .user_header::<UProtocolHeader>()
-                    .open_or_create_with_attributes(&source_attribute_verifier(&definition.source)?)
-                    .map_err(|_| setup_error("native prepared service cannot be opened"))?;
-                verify_limits(&config, service.static_config(), &native)?;
-                let publisher = service
-                    .publisher_builder()
-                    .initial_max_slice_len(config.publisher_initial_max_slice_len)
-                    .allocation_strategy(AllocationStrategy::Static)
-                    .create()
-                    .map_err(|_| setup_error("native prepared publisher cannot be reserved"))?;
-                let initial = publisher
-                    .loan_slice_uninit(config.publisher_initial_max_slice_len)
-                    .map_err(|_| setup_error("native static segment cannot be materialized"))?;
-                if config.publisher_prewarm {
-                    crate::pool_prewarm::preallocate(initial.payload().as_ptr() as usize)?;
+            let service = node
+                .service_builder(&name)
+                .publish_subscribe::<[u8]>()
+                .user_header::<UProtocolHeader>()
+                .open_or_create_with_attributes(&source_attribute_verifier(&definition.source)?)
+                .map_err(|_| setup_error("native prepared service cannot be opened"))?;
+            verify_limits(&config, service.static_config(), &native)?;
+            let publisher = if transmit.is_none_or(|mask| mask[index]) {
+                if let Some(previous) = endpoints
+                    .iter()
+                    .find(|entry| entry.name == name && entry.publisher.is_some())
+                {
+                    previous.publisher.clone()
+                } else {
+                    let publisher = service
+                        .publisher_builder()
+                        .initial_max_slice_len(config.publisher_initial_max_slice_len)
+                        .allocation_strategy(AllocationStrategy::Static)
+                        .create()
+                        .map_err(|_| setup_error("native prepared publisher cannot be reserved"))?;
+                    let initial = publisher
+                        .loan_slice_uninit(config.publisher_initial_max_slice_len)
+                        .map_err(|_| setup_error("native static segment cannot be materialized"))?;
+                    if config.publisher_prewarm {
+                        crate::pool_prewarm::preallocate(initial.payload().as_ptr() as usize)?;
+                    }
+                    drop(initial);
+                    Some(Arc::new(publisher))
                 }
-                drop(initial);
+            } else {
+                None
+            };
+            let notifier = if let Some(previous) = endpoints.iter().find(|entry| entry.name == name)
+            {
+                Arc::clone(&previous.notifier)
+            } else {
                 let event = node
                     .service_builder(&name)
                     .event()
                     .open_or_create()
                     .map_err(|_| setup_error("native prepared event cannot be opened"))?;
-                let notifier = event
-                    .notifier_builder()
-                    .create()
-                    .map_err(|_| setup_error("native event notifier cannot be reserved"))?;
-                (Arc::new(publisher), Arc::new(notifier))
+                Arc::new(
+                    event
+                        .notifier_builder()
+                        .create()
+                        .map_err(|_| setup_error("native event notifier cannot be reserved"))?,
+                )
             };
             endpoints.push(Endpoint {
                 definition: definition.clone(),
@@ -332,8 +378,10 @@ impl Iceoryx2PreparedCore {
         loop {
             let mut ready = true;
             for endpoint in &self.inner.endpoints {
-                endpoint
-                    .publisher
+                let Some(publisher) = &endpoint.publisher else {
+                    continue;
+                };
+                publisher
                     .update_connections()
                     .map_err(|_| setup_error("native publisher connection failed"))?;
                 endpoint
@@ -514,6 +562,9 @@ impl PreparedTransportCore for Iceoryx2PreparedCore {
                 &entry.definition.source == source && entry.definition.sink.as_ref() == sink
             })
             .ok_or(SetupError::InvalidRoute("physical route was not reserved"))?;
+        if self.inner.endpoints[endpoint].publisher.is_none() {
+            return Err(SetupError::InvalidRoute("receiver-only native address"));
+        }
         let reserved = self.inner.endpoints[endpoint].definition.limits;
         if frame_capacity(limits).is_none()
             || limits.max_metadata_len > reserved.max_metadata_len
@@ -555,6 +606,8 @@ impl PreparedTransportCore for Iceoryx2PreparedCore {
         }
         let mut sample = endpoint
             .publisher
+            .as_ref()
+            .ok_or(LoanError::InvalidRoute)?
             .loan_slice_uninit(sample_len)
             .map_err(|error| match error {
                 iceoryx2::port::LoanError::ExceedsMaxLoanSize => LoanError::SlotTooSmall,

@@ -99,3 +99,14 @@ exclude token operations from allocation measurement.
 See [capacity](capacity.md) for native slot/borrow/buffer limits and Linux
 hole-only backing preallocation, and [listener lifecycle](listener-lifecycle.md)
 for independently retained subscriber ownership.
+
+## Receiver-only physical reservations
+
+Use Iceoryx2PreparedCore::new_with_transmit_mask during setup when a catalog
+contains receive-only addresses. The mask has one entry per exact address. A
+false entry opens the service and supports real native subscriber attachment,
+but creates no publisher/data segment and rejects transmit reservations. True
+entries eagerly reserve the existing static sample geometry. The ordinary new
+constructor keeps its existing all-transmitting behavior. Publisher readiness
+checks only the transmit-capable entries; receive-only cores still attach before
+the remote publisher starts. No hot-path publisher creation or extra queue exists.

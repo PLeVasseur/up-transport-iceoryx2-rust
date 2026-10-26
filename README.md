@@ -94,3 +94,5 @@ actual util-linux `fincore` executable for the Linux backing-page tests.
 `Iceoryx2OwnedCore` is available only with `--features benchmark-owned`. It is a
 disabled-by-default owned-frame support path for measurements and selected-wire
 owned tests; it is not zero-copy evidence.
+
+Receiver-only prepared reservations avoid unused native publisher pools. See [Receiver-only physical reservations](docs/prepared.md#receiver-only-physical-reservations).
