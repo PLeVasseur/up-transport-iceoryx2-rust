@@ -43,5 +43,14 @@ criterion = { version = "0.5.1", features = ["csv_output"] }
 serde_json = "1.0.145"
 up-wire-xcdrv2 = { version = "=0.0.0", git = "https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "71e1b320056854e1fb480ed0b8b9340a1de74ab0" }
 
+[[test]]
+name = "iceoryx2_owned_wire"
+required-features = ["benchmark-owned"]
+
 [package.metadata.docs.rs]
 all-features = true
+
+[[bench]]
+name = "transport_criterion"
+harness = false
+required-features = ["payload-contract-benchmarks"]

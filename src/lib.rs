@@ -32,6 +32,8 @@ use tokio::sync::RwLock;
 use up_rust::ComparableListener;
 
 mod classic;
+#[cfg(feature = "benchmark-owned")]
+mod owned;
 pub(crate) mod service_attributes;
 pub(crate) mod service_name_mapping;
 /// Construction of the classic message transport for supported messaging patterns.
@@ -41,6 +43,8 @@ pub(crate) mod utransport_pubsub;
 pub(crate) mod workers;
 
 pub use iceoryx2::prelude::MessagingPattern;
+#[cfg(feature = "benchmark-owned")]
+pub use owned::{BenchmarkOwnedIceoryx2Core, Iceoryx2EncodedOwnedFrameLog, Iceoryx2OwnedCore};
 pub use uprotocolheader::{Iceoryx2PayloadLayout, UProtocolHeader};
 pub use utransport_pubsub::{
     Iceoryx2PubSub, Iceoryx2PubSubConfig, Iceoryx2PullMismatchQueueFullPolicy, Iceoryx2RxLease,
