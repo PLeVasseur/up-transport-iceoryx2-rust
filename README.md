@@ -8,6 +8,13 @@ See the [listener lifecycle guide](docs/listener-lifecycle.md) for configuration
 
 ## Transport APIs
 
+Each listener registration gets a native subscriber per matching service.
+iceoryx2 performs shared-chunk fan-out and each callback owns an independent native
+sample. The SDK checks full source/sink filters. See
+[listener lifecycle](docs/listener-lifecycle.md) for native port and lease ownership.
+Receive leases retain the actual native subscriber until the sample is released,
+protecting them against publisher pool reuse after unregister or endpoint drop.
+
 Fixed-budget deployments can opt into exact native service limits and hard static
 first-loan capacity through `Iceoryx2PubSubConfig::require_exact_service_limits`.
 Use `Iceoryx2PubSub::try_with_config` for typed setup errors. See the

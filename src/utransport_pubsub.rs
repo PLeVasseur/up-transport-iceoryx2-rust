@@ -608,6 +608,7 @@ impl Iceoryx2PubSubInner {
                         Ok(Some(sample)) => {
                             let lease = lease_from_sample(
                                 sample,
+                                subscriber.clone(),
                                 registration.source_filter.clone(),
                                 registration.sink_filter.clone(),
                             )?;
@@ -938,11 +939,31 @@ pub struct Iceoryx2UninitTxLoan {
 }
 
 /// Receive lease backed directly by a live iceoryx2 sample.
+///
+/// Also retains its native subscriber port, so unregistering a logical listener
+/// or dropping the endpoint cannot let a still-running publisher reclaim the
+/// sample. The native sample is released before that port keepalive. Retained
+/// leases therefore occupy native capacity until dropped; no timeout revokes them.
 pub struct Iceoryx2RxLease {
-    sample: IpcSample,
+    sample: RetainedNativeSample,
     layout: Iceoryx2PayloadLayout,
     source_filter_hint: UUri,
     sink_filter_hint: Option<UUri>,
+}
+
+// One native Sample per lease; this is ordinary lifetime ownership, not sample
+// sharing. Declaration order releases the native borrow before the subscriber
+// registration, including validation errors/unwinding before a lease is returned.
+struct RetainedNativeSample {
+    sample: IpcSample,
+    _subscriber: Arc<IpcSubscriber>,
+}
+
+impl std::ops::Deref for RetainedNativeSample {
+    type Target = IpcSample;
+    fn deref(&self) -> &IpcSample {
+        &self.sample
+    }
 }
 
 impl Iceoryx2TxLoan {
@@ -1026,7 +1047,6 @@ impl Iceoryx2RxLease {
     fn source_filter_hint(&self) -> &UUri {
         &self.source_filter_hint
     }
-
     fn sink_filter_hint(&self) -> Option<&UUri> {
         self.sink_filter_hint.as_ref()
     }
@@ -1201,7 +1221,12 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
                 .receive()
                 .map_err(|error| UStatus::fail_with_code(UCode::Internal, error.to_string()))?
             {
-                let lease = lease_from_sample(sample, source_filter.clone(), sink_filter.cloned())?;
+                let lease = lease_from_sample(
+                    sample,
+                    subscriber.clone(),
+                    source_filter.clone(),
+                    sink_filter.cloned(),
+                )?;
                 if !sink_matches(lease.sink_filter_hint(), sink_filter) {
                     self.inner.queue_pull_sample(service_name, lease).await?;
                     continue;
@@ -1370,9 +1395,14 @@ impl UZeroCopyUninitTransportCore for Iceoryx2PubSub {
 
 fn lease_from_sample(
     sample: IpcSample,
+    subscriber: Arc<IpcSubscriber>,
     source_filter_hint: UUri,
     sink_filter_hint: Option<UUri>,
 ) -> Result<Iceoryx2RxLease, UStatus> {
+    let sample = RetainedNativeSample {
+        sample,
+        _subscriber: subscriber,
+    };
     let layout = sample
         .user_header()
         .payload_layout(sample.payload().len())
@@ -1483,4 +1513,78 @@ fn validate_payload_address_alignment(
 
 fn sink_matches(actual: Option<&UUri>, filter: Option<&UUri>) -> bool {
     filter.is_none_or(|filter| actual.is_some_and(|actual| filter.matches(actual)))
+}
+
+#[cfg(test)]
+mod retained_native_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn receive_lease_keeps_original_native_addresses_for_small_and_full_size_samples() {
+        let root = std::env::var("UP_ICEORYX2_TEST_ROOT").unwrap_or_else(|_| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("target/native-retention")
+                .to_string_lossy()
+                .into_owned()
+        });
+        std::fs::create_dir_all(&root).unwrap();
+        for payload_len in [4, 4_915_328, 12_441_784] {
+            let sample_len = worst_case_aligned_sample_len(16, payload_len, 8).unwrap();
+            let mut config = Iceoryx2PubSubConfig::static_allocation(sample_len)
+                .with_namespace(
+                    &root,
+                    &format!("addr{}_{}_", std::process::id(), payload_len),
+                )
+                .unwrap();
+            let limits = &mut config
+                .iceoryx2_config
+                .as_mut()
+                .unwrap()
+                .defaults
+                .publish_subscribe;
+            limits.max_subscribers = 1;
+            limits.publisher_max_loaned_samples = 1;
+            config.require_exact_service_limits = true;
+            let core = Iceoryx2PubSub::try_with_config(config).unwrap();
+            let source = UUri::try_from_parts("native-address", 0x4210, 1, 0x9001).unwrap();
+            let name =
+                compute_service_name(&source, None, MessagingPattern::PublishSubscribe).unwrap();
+            let subscriber = Arc::new(core.inner.create_subscriber(name, Some(&source)).unwrap());
+            let publisher = core
+                .inner
+                .get_or_create_publisher(name, &source, sample_len)
+                .await
+                .unwrap();
+            let mut tx = publisher.loan_slice(sample_len).unwrap();
+            tx.payload_mut().fill(0x5a);
+            let offset = aligned_payload_offset(tx.payload().as_ptr() as usize, 16, 8).unwrap();
+            let layout =
+                Iceoryx2PayloadLayout::from_validated_parts(16, offset, payload_len, 8, sample_len)
+                    .unwrap();
+            tx.user_header_mut().write_payload_layout(layout).unwrap();
+            assert_eq!(tx.send().unwrap(), 1);
+            let sample = subscriber.receive().unwrap().unwrap();
+            let original = layout.payload(sample.payload()).unwrap();
+            let original_address = original.as_ptr() as usize;
+            let metadata_address = sample.payload().as_ptr() as usize;
+            assert_eq!(original.len(), payload_len);
+            assert_eq!(original_address % 8, 0);
+            let weak = Arc::downgrade(&subscriber);
+            let lease = lease_from_sample(sample, subscriber.clone(), source, None).unwrap();
+            drop(subscriber);
+            assert!(weak.upgrade().is_some());
+            assert_eq!(lease.encoded_metadata().as_ptr() as usize, metadata_address);
+            assert_eq!(
+                lease.try_contiguous_payload().unwrap().as_ptr() as usize,
+                original_address
+            );
+            assert_eq!(lease.payload_len(), payload_len);
+            let loan = lease.loaned_contiguous_payload().unwrap();
+            assert_eq!(loan.bytes().as_ptr() as usize, original_address);
+            assert_eq!(loan.bytes().len(), payload_len);
+            assert!(loan.bytes().iter().all(|byte| *byte == 0x5a));
+            drop(lease);
+            assert!(weak.upgrade().is_none());
+        }
+    }
 }

@@ -44,3 +44,11 @@ slots; both can retain independent loans to a publication. Different virtual
 mapping addresses do not imply payload copies. Unregistering or destroying one
 subscriber never revokes the other's retained sample. Native tests cover fan-out,
 independent retained loans and rejection only beyond the configured ceiling.
+
+Each listener registration creates a native subscriber for every matching service;
+budget overlapping directed and sinkless filters separately. Wildcards can attach
+to several services. Native fan-out delivers independently retained sample handles
+backed by the same published chunk, without a custom per-message ownership box.
+Application-held receive leases keep their native subscriber ports alive after
+logical unregister or endpoint destruction. Budget those retained ports; a newly
+requested subscriber can be rejected until the final old lease is released.

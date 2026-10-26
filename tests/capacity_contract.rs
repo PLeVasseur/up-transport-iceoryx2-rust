@@ -20,6 +20,266 @@ use up_transport_iceoryx2_rust::{Iceoryx2PubSub, Iceoryx2PubSubConfig, UProtocol
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
+#[tokio::test(flavor = "multi_thread")]
+async fn logical_filters_delegate_to_independent_native_subscribers() {
+    let mut config = config();
+    config
+        .iceoryx2_config
+        .as_mut()
+        .unwrap()
+        .defaults
+        .publish_subscribe
+        .max_subscribers = 3;
+    config.publisher_min_subscribers = 3; // Two sinkless filters and one directed filter.
+    let receiver = Iceoryx2PubSub::try_with_config(config.clone())
+        .unwrap()
+        .with_selected_wire(ProtobufWire);
+    let sender = Iceoryx2PubSub::try_with_config(config)
+        .unwrap()
+        .with_selected_wire(ProtobufWire);
+    let (a, mut a_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (b, mut b_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (directed, mut directed_rx) = tokio::sync::mpsc::unbounded_channel();
+    let a: Arc<dyn UZeroCopyListener<Frame>> = Arc::new(Capture(a));
+    let b: Arc<dyn UZeroCopyListener<Frame>> = Arc::new(Capture(b));
+    let directed: Arc<dyn UZeroCopyListener<Frame>> = Arc::new(Capture(directed));
+    let sink = UUri::try_from_parts("receiver", 0x4210, 1, 0).unwrap();
+    receiver
+        .register_validated_zero_copy_listener(&source(), None, a.clone())
+        .await
+        .unwrap();
+    receiver
+        .register_validated_zero_copy_listener(&source(), None, b.clone())
+        .await
+        .unwrap();
+    receiver
+        .register_validated_zero_copy_listener(&UUri::any(), Some(&sink), directed.clone())
+        .await
+        .unwrap();
+    let mut tx = sender.loan_validated_tx(spec(4)).await.unwrap();
+    tx.payload_mut().copy_from_slice(b"both");
+    sender.send_validated_zero_copy(tx).await.unwrap();
+    let first = tokio::time::timeout(Duration::from_secs(2), a_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(2), b_rx.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(first.metadata().id(), second.metadata().id());
+    #[cfg(target_os = "linux")]
+    assert_eq!(
+        native_backing(first.try_contiguous_payload().unwrap()),
+        native_backing(second.try_contiguous_payload().unwrap())
+    );
+    assert_eq!(first.try_contiguous_payload(), Some(b"both".as_slice()));
+    assert_eq!(second.try_contiguous_payload(), Some(b"both".as_slice()));
+    assert!(directed_rx.try_recv().is_err()); // None is sinkless, not a wildcard.
+    receiver
+        .unregister_validated_zero_copy_listener(&source(), None, a)
+        .await
+        .unwrap();
+    drop(first);
+    receiver
+        .unregister_validated_zero_copy_listener(&source(), None, b)
+        .await
+        .unwrap();
+    receiver
+        .unregister_validated_zero_copy_listener(&UUri::any(), Some(&sink), directed)
+        .await
+        .unwrap();
+    drop(receiver);
+    drop(sender);
+    assert_eq!(second.try_contiguous_payload(), Some(b"both".as_slice()));
+}
+
+// Compare shared object + offset, not virtual addresses of separate native maps.
+#[cfg(target_os = "linux")]
+fn native_backing(bytes: &[u8]) -> (String, u64, u64) {
+    let address = bytes.as_ptr() as u64;
+    for line in std::fs::read_to_string("/proc/self/maps").unwrap().lines() {
+        let mut fields = line.split_whitespace();
+        let (start, end) = fields.next().unwrap().split_once('-').unwrap();
+        let start = u64::from_str_radix(start, 16).unwrap();
+        let end = u64::from_str_radix(end, 16).unwrap();
+        let permissions = fields.next().unwrap();
+        let offset = u64::from_str_radix(fields.next().unwrap(), 16).unwrap();
+        let device = fields.next().unwrap();
+        let inode: u64 = fields.next().unwrap().parse().unwrap();
+        if start <= address && address + bytes.len() as u64 <= end {
+            assert!(
+                permissions.ends_with('s'),
+                "payload must remain in shared mapping"
+            );
+            assert_ne!(
+                inode, 0,
+                "payload must retain its native shared-memory backing"
+            );
+            return (device.into(), inode, offset + address - start);
+        }
+    }
+    panic!("native payload mapping missing");
+}
+
+async fn retained_sample_under_publisher_pressure(listener_mode: bool) {
+    let config = config();
+    let publisher = Iceoryx2PubSub::try_with_config(config.clone())
+        .unwrap()
+        .with_selected_wire(ProtobufWire);
+    let receiver = Iceoryx2PubSub::try_with_config(config.clone())
+        .unwrap()
+        .with_selected_wire(ProtobufWire);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let listener: Arc<dyn UZeroCopyListener<Frame>> = Arc::new(Capture(tx));
+    if listener_mode {
+        receiver
+            .register_validated_zero_copy_listener(&source(), None, listener.clone())
+            .await
+            .unwrap();
+    } else {
+        assert_eq!(
+            receiver
+                .receive_validated_zero_copy(&source(), None)
+                .await
+                .unwrap_err()
+                .code(),
+            UCode::NotFound
+        );
+    }
+    let mut tx = publisher.loan_validated_tx(spec(4)).await.unwrap();
+    tx.payload_mut().copy_from_slice(b"kept");
+    publisher.send_validated_zero_copy(tx).await.unwrap();
+    let retained = if listener_mode {
+        tokio::time::timeout(Duration::from_secs(2), rx.recv())
+            .await
+            .unwrap()
+            .unwrap()
+    } else {
+        receiver
+            .receive_validated_zero_copy(&source(), None)
+            .await
+            .unwrap()
+    };
+    let address = retained.try_contiguous_payload().unwrap().as_ptr() as usize;
+    let observer = NodeBuilder::new()
+        .config(config.iceoryx2_config.as_ref().unwrap())
+        .create::<ipc_threadsafe::Service>()
+        .unwrap();
+    let service_name = Iceoryx2PubSub::exact_source_publish_subscribe_service_name(
+        &ExactUUri::try_from(source()).unwrap(),
+    )
+    .unwrap();
+    let service = observer
+        .service_builder(&ServiceName::new(&service_name).unwrap())
+        .publish_subscribe::<[u8]>()
+        .user_header::<UProtocolHeader>()
+        .open()
+        .unwrap();
+    if listener_mode {
+        receiver
+            .unregister_validated_zero_copy_listener(&source(), None, listener)
+            .await
+            .unwrap();
+    }
+    drop(receiver);
+    // Allow the weak dispatcher to retire; inspect the actual native port count
+    // rather than mistaking a still-running callback/worker for lease ownership.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    println!(
+        "retained native subscribers before reuse: {}",
+        service.dynamic_config().number_of_subscribers()
+    );
+    // If the old endpoint incorrectly released its registration, a replacement
+    // can occupy it. Retain two new samples and fill its queue to exercise every
+    // slot, rather than repeatedly recycling one free bucket in a LIFO allocator.
+    let mut pressure_samples = Vec::new();
+    let pressure = if service.dynamic_config().number_of_subscribers() == 0 {
+        let pressure = Iceoryx2PubSub::try_with_config(config.clone())
+            .unwrap()
+            .with_selected_wire(ProtobufWire);
+        assert_eq!(
+            pressure
+                .receive_validated_zero_copy(&source(), None)
+                .await
+                .unwrap_err()
+                .code(),
+            UCode::NotFound
+        );
+        for value in 0..2_u32 {
+            let mut tx = publisher.loan_validated_tx(spec(4)).await.unwrap();
+            tx.payload_mut().copy_from_slice(&value.to_ne_bytes());
+            publisher.send_validated_zero_copy(tx).await.unwrap();
+            pressure_samples.push(
+                pressure
+                    .receive_validated_zero_copy(&source(), None)
+                    .await
+                    .unwrap(),
+            );
+        }
+        Some(pressure)
+    } else {
+        None
+    };
+    // Do not retain a borrowed &[u8] across this deliberately adversarial baseline.
+    // Native writes finish before the retained sample is inspected again.
+    for value in 0..256_u32 {
+        let mut tx = publisher.loan_validated_tx(spec(4)).await.unwrap();
+        tx.payload_mut().copy_from_slice(&value.to_ne_bytes());
+        publisher.send_validated_zero_copy(tx).await.unwrap();
+    }
+    assert_eq!(
+        retained.try_contiguous_payload(),
+        Some(b"kept".as_slice()),
+        "live native sample was recycled after endpoint destruction"
+    );
+    assert_eq!(service.dynamic_config().number_of_subscribers(), 1);
+    drop(pressure_samples);
+    drop(pressure);
+    assert_eq!(
+        retained.try_contiguous_payload().unwrap().as_ptr() as usize,
+        address
+    );
+    let retained = std::thread::spawn(move || {
+        assert_eq!(retained.try_contiguous_payload(), Some(b"kept".as_slice()));
+        retained
+    })
+    .join()
+    .unwrap();
+    let replacement = Iceoryx2PubSub::try_with_config(config)
+        .unwrap()
+        .with_selected_wire(ProtobufWire);
+    assert_eq!(
+        replacement
+            .receive_validated_zero_copy(&source(), None)
+            .await
+            .unwrap_err()
+            .code(),
+        UCode::Internal,
+        "retained sample must keep its native subscriber registration alive"
+    );
+    drop(retained);
+    assert_eq!(
+        replacement
+            .receive_validated_zero_copy(&source(), None)
+            .await
+            .unwrap_err()
+            .code(),
+        UCode::NotFound,
+        "final lease release must restore the native subscriber slot"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retained_listener_sample_survives_continued_publication_after_unregister() {
+    retained_sample_under_publisher_pressure(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn retained_pull_sample_survives_continued_publication_after_endpoint_drop() {
+    retained_sample_under_publisher_pressure(false).await;
+}
+
 type Transport = UNativePrefixWireTransport<Iceoryx2PubSub, ProtobufWire>;
 type Frame = <Transport as UZeroCopyTransportImpl>::Rx;
 
