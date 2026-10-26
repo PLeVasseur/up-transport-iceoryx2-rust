@@ -33,6 +33,11 @@ use up_rust::{
     UCode, UStatus, UUri, WrittenHeader,
 };
 
+type NativeService = iceoryx2::service::port_factory::publish_subscribe::PortFactory<
+    ipc_threadsafe::Service,
+    [u8],
+    UProtocolHeader,
+>;
 type NativePublisher = Publisher<ipc_threadsafe::Service, [u8], UProtocolHeader>;
 type NativeSubscriber = Subscriber<ipc_threadsafe::Service, [u8], UProtocolHeader>;
 type NativeSample = Sample<ipc_threadsafe::Service, [u8], UProtocolHeader>;
@@ -61,6 +66,8 @@ struct Endpoint {
     publisher: Option<Arc<NativePublisher>>,
     notifier: Arc<NativeNotifier>,
     sample_len: usize,
+    // Own the service even when no publisher exists to retain its native metadata.
+    _service: NativeService,
 }
 
 struct Inner {
@@ -213,6 +220,8 @@ impl Iceoryx2PreparedCore {
     /// or data segment and rejects TX reservation. True entries eagerly reserve
     /// the same static pools and limits as [`Self::new`]. Call during setup; no
     /// publisher is ever created by loan, publish or the receive callback.
+    /// The core retains the native service descriptor for its entire lifetime,
+    /// allowing receive attachment before any remote publisher is created.
     ///
     /// # Errors
     /// Rejects a mask length differing from the catalog and all invalid setup
@@ -344,6 +353,7 @@ impl Iceoryx2PreparedCore {
                 publisher,
                 notifier,
                 sample_len,
+                _service: service,
             });
         }
         Ok(Self {

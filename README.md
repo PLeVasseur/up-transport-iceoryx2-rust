@@ -96,3 +96,5 @@ disabled-by-default owned-frame support path for measurements and selected-wire
 owned tests; it is not zero-copy evidence.
 
 Receiver-only prepared reservations avoid unused native publisher pools. See [Receiver-only physical reservations](docs/prepared.md#receiver-only-physical-reservations).
+
+Receive-only prepared cores own their service descriptors through attachment, including receiver-first startup without an unused TX pool. See [Receiver-first startup and service ownership](docs/prepared.md#receiver-first-startup-and-service-ownership).

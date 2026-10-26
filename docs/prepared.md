@@ -110,3 +110,12 @@ entries eagerly reserve the existing static sample geometry. The ordinary new
 constructor keeps its existing all-transmitting behavior. Publisher readiness
 checks only the transmit-capable entries; receive-only cores still attach before
 the remote publisher starts. No hot-path publisher creation or extra queue exists.
+
+### Receiver-first startup and service ownership
+
+A receive-only core retains its native service descriptor until the core is
+dropped. It can attach a real subscriber before a publisher is created, including
+the receive half of an RPC catalog. This metadata ownership reserves no publisher
+or payload data arena. The eventual transmitting endpoint still owns the single
+configured data pool. Keep the core alive through registration detach; constructor
+success does not itself assert that a remote publisher is connected.

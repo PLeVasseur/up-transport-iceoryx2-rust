@@ -618,3 +618,83 @@ async fn receiver_only_mask_borrows_real_native_samples_without_an_extra_pool() 
     drop(frame);
     receiver.detach(&mut subscription).unwrap();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn receiver_first_mask_keeps_service_until_a_native_publisher_arrives() {
+    use iceoryx2::prelude::SemanticString;
+    use up_transport_iceoryx2_rust::{Iceoryx2PreparedCore, Iceoryx2RouteReservation};
+    let config = common::config(8192, 1);
+    let prefix = String::from_utf8(
+        config
+            .iceoryx2_config
+            .as_ref()
+            .unwrap()
+            .global
+            .prefix
+            .as_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    let backings = || -> std::collections::BTreeSet<(String, String)> {
+        std::fs::read_to_string("/proc/self/maps")
+            .unwrap()
+            .lines()
+            .filter_map(|line| {
+                let fields: Vec<_> = line.split_whitespace().collect();
+                (fields.len() >= 6 && fields[5].contains(&prefix) && fields[5].ends_with(".data"))
+                    .then(|| (fields[3].to_string(), fields[4].to_string()))
+            })
+            .collect()
+    };
+    let catalog = [Iceoryx2RouteReservation {
+        source: common::source(),
+        sink: None,
+        limits: common::limits(0),
+    }];
+    let receiver = Arc::new(
+        Iceoryx2PreparedCore::new_with_transmit_mask(config.clone(), &catalog, &[false], 4, 1)
+            .unwrap(),
+    );
+    assert!(backings().is_empty());
+    let inbox = Arc::new(
+        up_rust::RegistrationInbox::<Iceoryx2PreparedRx>::new(common::registration()).unwrap(),
+    );
+    // No publisher exists yet: the receive-only core must own its service metadata.
+    let mut subscription = receiver
+        .attach(&common::source(), None, inbox.clone())
+        .await
+        .unwrap();
+    assert!(backings().is_empty());
+    let sender = Arc::new(Iceoryx2PreparedCore::new(config, &catalog, 4, 1).unwrap());
+    let physical = backings();
+    assert_eq!(physical.len(), 1);
+    sender.wait_ready().await.unwrap();
+    let route = OpaqueTemplate::for_wire::<up_rust::ProtobufWire>()
+        .unwrap()
+        .route(
+            Arc::clone(&sender),
+            common::source(),
+            None,
+            common::limits(0),
+            RouteConfig::default(),
+        )
+        .unwrap();
+    let metadata = UFrameMetadata::publish(common::source())
+        .with_payload_encoding(PayloadEncoding::PROTOBUF)
+        .build()
+        .unwrap();
+    route
+        .send_bytes(TxHeaderParts::from(&metadata), Some(&[]))
+        .unwrap();
+    let raw = tokio::time::timeout(Duration::from_secs(5), inbox.recv())
+        .await
+        .unwrap()
+        .unwrap();
+    let admission =
+        HeaderAdmission::for_wire::<up_rust::ProtobufWire>(HeaderLimits::default()).unwrap();
+    let frame = admission.admit(raw).unwrap();
+    assert!(frame.payload().unwrap().bytes().is_empty());
+    assert_eq!(backings(), physical);
+    drop(frame);
+    receiver.detach(&mut subscription).unwrap();
+}
