@@ -13,18 +13,20 @@
 
 use std::sync::Arc;
 
-use crate::utransport_pubsub::Iceoryx2PubSub;
+use crate::classic::Iceoryx2PubSub;
 use iceoryx2::prelude::MessagingPattern;
 use up_rust::{UCode, UStatus, UTransport};
 
+/// Factory for classic uProtocol message carriage over iceoryx2 publish/subscribe.
 pub struct UTransportIceoryx2 {}
 
 impl UTransportIceoryx2 {
+    /// Builds the publish/subscribe transport, rejecting unsupported messaging patterns.
     pub fn build(messaging_pattern: MessagingPattern) -> Result<Arc<impl UTransport>, UStatus> {
         match messaging_pattern {
             MessagingPattern::PublishSubscribe => Ok(UTransportIceoryx2::build_publish_subscribe()),
             _ => Err(UStatus::fail_with_code(
-                UCode::UNIMPLEMENTED,
+                UCode::Unimplemented,
                 "Unimplemented messaging pattern",
             )),
         }

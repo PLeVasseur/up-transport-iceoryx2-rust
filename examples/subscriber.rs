@@ -11,6 +11,8 @@
 // SPDX-License-Identifier: Apache-2.0
 // ################################################################################
 
+//! Subscribe to classic uProtocol messages over iceoryx2 publish/subscribe.
+
 use async_trait::async_trait;
 use std::{str::FromStr, sync::Arc};
 use up_rust::{UListener, UMessage, UTransport, UUri};
@@ -24,7 +26,7 @@ struct ConsolePrinter;
 #[async_trait]
 impl UListener for ConsolePrinter {
     async fn on_receive(&self, message: UMessage) {
-        let payload_memory_address = message.payload.as_ref().unwrap();
+        let payload_memory_address = message.payload().unwrap().as_ptr();
         println!("Received a message!");
         print_umessage(&message);
         println!("Payload Memory address: {payload_memory_address:p}");
