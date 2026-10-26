@@ -186,43 +186,7 @@ async fn retained_sample_under_publisher_pressure(listener_mode: bool) {
     // Allow the weak dispatcher to retire; inspect the actual native port count
     // rather than mistaking a still-running callback/worker for lease ownership.
     tokio::time::sleep(Duration::from_millis(100)).await;
-    println!(
-        "retained native subscribers before reuse: {}",
-        service.dynamic_config().number_of_subscribers()
-    );
-    // If the old endpoint incorrectly released its registration, a replacement
-    // can occupy it. Retain two new samples and fill its queue to exercise every
-    // slot, rather than repeatedly recycling one free bucket in a LIFO allocator.
-    let mut pressure_samples = Vec::new();
-    let pressure = if service.dynamic_config().number_of_subscribers() == 0 {
-        let pressure = Iceoryx2PubSub::try_with_config(config.clone())
-            .unwrap()
-            .with_selected_wire(ProtobufWire);
-        assert_eq!(
-            pressure
-                .receive_validated_zero_copy(&source(), None)
-                .await
-                .unwrap_err()
-                .code(),
-            UCode::NotFound
-        );
-        for value in 0..2_u32 {
-            let mut tx = publisher.loan_validated_tx(spec(4)).await.unwrap();
-            tx.payload_mut().copy_from_slice(&value.to_ne_bytes());
-            publisher.send_validated_zero_copy(tx).await.unwrap();
-            pressure_samples.push(
-                pressure
-                    .receive_validated_zero_copy(&source(), None)
-                    .await
-                    .unwrap(),
-            );
-        }
-        Some(pressure)
-    } else {
-        None
-    };
-    // Do not retain a borrowed &[u8] across this deliberately adversarial baseline.
-    // Native writes finish before the retained sample is inspected again.
+    assert_eq!(service.dynamic_config().number_of_subscribers(), 1);
     for value in 0..256_u32 {
         let mut tx = publisher.loan_validated_tx(spec(4)).await.unwrap();
         tx.payload_mut().copy_from_slice(&value.to_ne_bytes());
@@ -234,8 +198,6 @@ async fn retained_sample_under_publisher_pressure(listener_mode: bool) {
         "live native sample was recycled after endpoint destruction"
     );
     assert_eq!(service.dynamic_config().number_of_subscribers(), 1);
-    drop(pressure_samples);
-    drop(pressure);
     assert_eq!(
         retained.try_contiguous_payload().unwrap().as_ptr() as usize,
         address
