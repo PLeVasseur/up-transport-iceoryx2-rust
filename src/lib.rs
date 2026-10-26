@@ -34,6 +34,7 @@ use up_rust::ComparableListener;
 mod classic;
 #[cfg(feature = "benchmark-owned")]
 mod owned;
+mod pool_prewarm;
 pub(crate) mod service_attributes;
 pub(crate) mod service_name_mapping;
 /// Construction of the classic message transport for supported messaging patterns.

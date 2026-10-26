@@ -1624,6 +1624,7 @@ dependencies = [
  "iceoryx2-bb-container",
  "iceoryx2-bb-system-types",
  "protobuf",
+ "rustix 0.38.44",
  "serde_json",
  "tokio",
  "up-rust",

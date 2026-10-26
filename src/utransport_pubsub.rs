@@ -389,11 +389,13 @@ impl Iceoryx2PubSubInner {
         // first loan. Materialize it before this async operation yields so a
         // concurrently discovering receiver cannot attach to the placeholder
         // segment and lose the first real chunk.
-        drop(
-            publisher
-                .loan_slice_uninit(required_slice_len)
-                .map_err(|error| map_loan_error(error, "prepare publisher data segment"))?,
-        );
+        let initial = publisher
+            .loan_slice_uninit(required_slice_len)
+            .map_err(|error| map_loan_error(error, "prepare publisher data segment"))?;
+        if self.config.publisher_prewarm {
+            crate::pool_prewarm::preallocate(initial.payload().as_ptr() as usize)?;
+        }
+        drop(initial);
         publishers.insert(service_name, publisher.clone());
         Ok(publisher)
     }
@@ -758,6 +760,10 @@ pub struct Iceoryx2PubSubConfig {
     pub publisher_initial_max_slice_len: usize,
     /// iceoryx2 allocation strategy for publish loans.
     pub publisher_allocation_strategy: AllocationStrategy,
+    /// Preallocate all backing pages of a Linux exact/static publisher before admission.
+    /// Disabled by default. This preserves file size, slot/TX limits and sample bytes;
+    /// unsupported platforms or native allocation failures return typed errors.
+    pub publisher_prewarm: bool,
     /// Maximum retained pull samples that did not match the requested filter.
     pub pull_mismatch_queue_capacity: usize,
     /// Behavior when the pull mismatch queue reaches its capacity.
@@ -783,6 +789,7 @@ impl Default for Iceoryx2PubSubConfig {
             require_exact_service_limits: false,
             publisher_initial_max_slice_len: 1,
             publisher_allocation_strategy: AllocationStrategy::PowerOfTwo,
+            publisher_prewarm: false,
             pull_mismatch_queue_capacity: 64,
             pull_mismatch_queue_full_policy:
                 Iceoryx2PullMismatchQueueFullPolicy::DropOldestAndReport,
@@ -807,6 +814,22 @@ impl Iceoryx2PubSubConfig {
     /// Returns `InvalidArgument` for missing/zero/incompatible limits and
     /// `OutOfRange` if the configured slot or minimum byte count overflows.
     pub fn validate(&self) -> Result<(), UStatus> {
+        if self.publisher_prewarm {
+            if !cfg!(target_os = "linux") {
+                return Err(UStatus::fail_with_code(
+                    UCode::Unimplemented,
+                    "publisher backing preallocation requires Linux",
+                ));
+            }
+            if !self.require_exact_service_limits
+                || self.publisher_allocation_strategy != AllocationStrategy::Static
+            {
+                return Err(UStatus::fail_with_code(
+                    UCode::InvalidArgument,
+                    "publisher prewarming requires exact static service capacities",
+                ));
+            }
+        }
         if !self.require_exact_service_limits {
             return Ok(());
         }

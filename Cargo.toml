@@ -43,6 +43,9 @@ criterion = { version = "0.5.1", features = ["csv_output"] }
 serde_json = "1.0.145"
 up-wire-xcdrv2 = { version = "=0.0.0", git = "https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "74bb7b08b0d3f1ffc966902e48376ffe0b7024bb" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+rustix = { version = "=0.38.44", features = ["fs"] }
+
 [[test]]
 name = "iceoryx2_owned_wire"
 required-features = ["benchmark-owned"]

@@ -21,6 +21,11 @@ Use `Iceoryx2PubSub::try_with_config` for typed setup errors. See the
 [capacity guide](docs/capacity.md) for participant compatibility, slot accounting
 and the distinction between physical pools and application receive queues.
 
+Linux exact/static publishers may additionally set disabled-default
+`publisher_prewarm` to materialize the existing backing object's pages before
+loan admission, preserving bytes and native slot/TX limits. See
+[backing-page preallocation](docs/capacity.md#linux-static-backing-page-preallocation).
+
 The [public API and placement guide](docs/api-contract.md) explains header/layout
 fields and mismatch diagnostics. Public documentation uses `missing_docs = "deny"`.
 `UProtocolHeader::reserved` explicitly occupies bytes1–7 and must be zero. Header

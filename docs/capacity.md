@@ -52,3 +52,32 @@ backed by the same published chunk, without a custom per-message ownership box.
 Application-held receive leases keep their native subscriber ports alive after
 logical unregister or endpoint destruction. Budget those retained ports; a newly
 requested subscriber can be rejected until the final old lease is released.
+
+## Linux static backing-page preallocation
+
+`publisher_prewarm = true` is an optional exact/static publisher setting. Its
+disabled default preserves ordinary sparse backing. Before returning the first
+loan, the binding identifies that live native loan's actual writable POSIX SHM
+mapping, opens the same backing object, verifies device/inode/extent, and requests
+whole-file backing allocation through the safe rustix filesystem API. It then
+queries kernel-reported hole/data extents and materializes only zero-valued holes
+with bounded zero-buffer file writes. Existing data extents are never rewritten.
+This preserves logical contents while turning reservation-only pages into actual
+data pages. It is construction-time backing access, not per-message receive or
+forwarding behavior; no raw sample reference or mapping is formed. The setup
+does not resize the object, overwrite sample/header bytes, change native slots or
+TX limits, create another publisher/port, or introduce a payload-copy fallback.
+
+Only Linux exact/static geometry is supported. Other platforms return
+`Unimplemented`; nonstatic/nonexact requests return `InvalidArgument`. Descriptor
+or native setup failures return `Internal`; backing allocation failure returns
+`ResourceExhausted`, with no admitted publisher or smaller-pool fallback. The
+descriptor is released after setup; original publisher/sample mappings retain
+their existing ownership. Native callbacks, subscriber retention and quiescence
+remain independent.
+
+`NATIVE_POOL_PREALLOCATED` reports the actual backing descriptor identity and byte
+extent. That allocation receipt and a VMA's RSS are not the same measurement:
+an existing alias can retain sparse page-table entries even after the backing
+object's pages are materialized. Native tests independently query whole-file
+residency with util-linux `fincore` and verify existing bytes and TX bounds.

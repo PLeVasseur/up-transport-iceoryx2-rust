@@ -257,6 +257,7 @@ impl UZeroCopyListener<Frame> for Capture {
 #[tokio::test(flavor = "multi_thread")]
 async fn strict_two_subscriber_fanout_retains_independent_native_loans() {
     let mut config = config();
+    config.publisher_prewarm = cfg!(target_os = "linux");
     config
         .iceoryx2_config
         .as_mut()
