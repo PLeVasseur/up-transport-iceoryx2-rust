@@ -1581,7 +1581,7 @@ checksum = "5a5f39404a5da50712a4c1eecf25e90dd62b613502b7e925fd4e4d19b5c96512"
 [[package]]
 name = "up-rust"
 version = "0.10.0-SNAPSHOT"
-source = "git+https://github.com/PLeVasseur/up-rust.git?rev=c9be9db4565b43f463734f3a335ea4902cb46a62#c9be9db4565b43f463734f3a335ea4902cb46a62"
+source = "git+https://github.com/PLeVasseur/up-rust.git?rev=75a5dd25dac271161d4709a0559b788befa21b67#75a5dd25dac271161d4709a0559b788befa21b67"
 dependencies = [
  "async-trait",
  "bytes",
@@ -1605,7 +1605,7 @@ dependencies = [
 [[package]]
 name = "up-rust-macros"
 version = "0.10.0-SNAPSHOT"
-source = "git+https://github.com/PLeVasseur/up-rust.git?rev=c9be9db4565b43f463734f3a335ea4902cb46a62#c9be9db4565b43f463734f3a335ea4902cb46a62"
+source = "git+https://github.com/PLeVasseur/up-rust.git?rev=75a5dd25dac271161d4709a0559b788befa21b67#75a5dd25dac271161d4709a0559b788befa21b67"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1622,6 +1622,7 @@ dependencies = [
  "hostname",
  "iceoryx2",
  "iceoryx2-bb-container",
+ "iceoryx2-bb-posix",
  "iceoryx2-bb-system-types",
  "protobuf",
  "rustix 0.38.44",
@@ -1633,8 +1634,8 @@ dependencies = [
 
 [[package]]
 name = "up-wire-xcdrv2"
-version = "0.0.0"
-source = "git+https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=74bb7b08b0d3f1ffc966902e48376ffe0b7024bb#74bb7b08b0d3f1ffc966902e48376ffe0b7024bb"
+version = "0.1.0"
+source = "git+https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=2eccbb9c50095d488e5586e0e82d12b5bceb2763#2eccbb9c50095d488e5586e0e82d12b5bceb2763"
 dependencies = [
  "up-rust",
  "up-wire-xcdrv2-macros",
@@ -1642,8 +1643,8 @@ dependencies = [
 
 [[package]]
 name = "up-wire-xcdrv2-macros"
-version = "0.0.0"
-source = "git+https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=74bb7b08b0d3f1ffc966902e48376ffe0b7024bb#74bb7b08b0d3f1ffc966902e48376ffe0b7024bb"
+version = "0.1.0"
+source = "git+https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git?rev=2eccbb9c50095d488e5586e0e82d12b5bceb2763#2eccbb9c50095d488e5586e0e82d12b5bceb2763"
 dependencies = [
  "proc-macro2",
  "quote",

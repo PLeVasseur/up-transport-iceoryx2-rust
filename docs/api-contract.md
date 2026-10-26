@@ -1,8 +1,11 @@
 # Public API and sample placement
 
 `UTransportIceoryx2::build` creates the classic publish/subscribe transport and
-returns `Unimplemented` for other messaging patterns. Selected-wire applications
-instead configure `Iceoryx2PubSub` and compose their chosen SDK wire adapter.
+returns `Unimplemented` for other messaging patterns. Prepared selected-wire
+applications configure `Iceoryx2PreparedCore` and use SDK routes/registrations;
+the [prepared guide](prepared.md) describes the finite native catalog and its
+synchronous storage contract. `Iceoryx2PubSub` supplies allocating encoded
+controls, including the feature-gated owned benchmark adapter.
 
 `UProtocolHeader` carries the physical header version and metadata/payload extents.
 The metadata prefix and visible payload share the sample byte region; payload
@@ -11,11 +14,11 @@ alignment must be a nonzero power of two. Layout validation checks conversion,
 ordering, checked end offsets and the actual sample length before exposing slices.
 These placement fields do not replace the selected-wire identity or final filters.
 
-The header has explicit reserved bytes at offsets1–7, in place of implicit Rust
+The header has explicit reserved bytes at offsets 1–7, in place of implicit Rust
 padding. Writers initialize them to zero, and receivers reject nonzero values
 before exposing payload slices. Raw producers and Rust struct literals must set
 `reserved: [0; 7]` (or start from `Default`). The physical major version is unchanged:
-size40, alignment8 and the existing field offsets are retained.
+size 40, alignment 8 and the existing field offsets are retained.
 
 | Field | Byte offset |
 | --- | --- |
@@ -37,10 +40,15 @@ assert_eq!(std::mem::align_of::<UProtocolHeader>(), 8);
 Selected-wire metadata contexts combine the selected wire and metadata codec;
 layout identity belongs to the codec. Loaned payload views use the SDK's safe
 constructor while retaining the original iceoryx2 sample as the storage owner.
+Prepared samples also retain their native subscriber and node lifecycle handle,
+released after the sample; endpoint destruction does not invalidate byte views.
 
 `Iceoryx2PayloadLayout` exposes validated lengths, alignment and an end-exclusive
 payload range. The bounded pull mismatch queue reports retained depth, dropped
 oldest samples, rejected newest samples and the latest mismatch diagnostic.
+Those dynamic diagnostics belong to the allocating control path. Prepared
+native statistics report physical receive/layout/borrowed-credit outcomes
+separately from SDK typed/filter/inbox admission and drop counters.
 
 See [listener lifecycle](listener-lifecycle.md) for quiescence and retained sample
 ownership. Public items, example targets and test harnesses are checked with

@@ -2,12 +2,12 @@
 // SPDX-License-Identifier: Apache-2.0
 //! Native static backing-page allocation and unchanged slot/loan limits.
 #![cfg(target_os = "linux")]
+#[path = "support/allocating_control.rs"]
+mod control;
+use control::Core as Iceoryx2PubSub;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use up_rust::{
-    PayloadEncoding, ProtobufWire, UCode, UFrameMetadata, UTxBuffer, UTxLoanSpec, UUri,
-    UZeroCopyTransportImpl,
-};
-use up_transport_iceoryx2_rust::{Iceoryx2PubSub, Iceoryx2PubSubConfig};
+use up_rust::{PayloadEncoding, ProtobufWire, UCode, UFrameMetadata, UTxBuffer, UTxLoanSpec, UUri};
+use up_transport_iceoryx2_rust::Iceoryx2PubSubConfig;
 
 static SEQUENCE: AtomicUsize = AtomicUsize::new(0);
 

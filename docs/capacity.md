@@ -1,5 +1,13 @@
 # Exact native service capacities
 
+Prepared transport uses `Iceoryx2PreparedCore::new` with a finite physical route
+catalog and explicit handle-table capacities. It always requires static allocation
+and rejects a reservation larger than the configured slice, including the first
+loan. `prepare_route` returns a fixed-size setup error for a missing destination,
+oversized layout or exhausted logical table. `loan` reports fixed-size pool/slot
+exhaustion. Native registration exhaustion returns `SetupError::TableFull`.
+The [prepared guide](prepared.md) documents resource creation and event delivery.
+
 Ordinary `Iceoryx2PubSubConfig` retains the middleware's default open/create and
 publisher-growth behavior. For a deployment with a fixed memory budget, set
 `require_exact_service_limits = true`, provide the native configuration and use
@@ -30,7 +38,7 @@ behavior; exact service ceilings alone do not promise a fixed dynamic byte pool.
 
 The pinned middleware's publisher sample budget is
 `max_subscribers * (buffer + borrowed) + history + TX loans`. For example,
-one subscriber, buffer2, borrowed2, history0 and TX1 require five slots per
+one subscriber, buffer 2, borrowed 2, history 0 and TX 1 require five slots per
 publisher. This is neither a consumer application-queue limit nor a process RSS
 prediction. A second subscriber cannot join a one-subscriber service; diagnostics
 must not consume the sole receiver slot. Allocator failure is an error, not an
@@ -39,7 +47,7 @@ retained-sample ownership contracts remain independent.
 
 One subscriber is a deployment example, not a transport restriction. The native
 default remains eight subscribers, and exact mode accepts larger configured
-ceilings. Two subscribers with buffer2/borrowed2/history0/TX1 need nine publisher
+ceilings. Two subscribers with buffer 2, borrowed 2, history 0 and TX 1 need nine publisher
 slots; both can retain independent loans to a publication. Different virtual
 mapping addresses do not imply payload copies. Unregistering or destroying one
 subscriber never revokes the other's retained sample. Native tests cover fan-out,

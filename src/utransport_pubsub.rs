@@ -4,7 +4,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // ################################################################################
 
-use async_trait::async_trait;
 use iceoryx2::port::LoanError;
 use iceoryx2::prelude::{
     AllocationStrategy, CallbackProgression, Config, MessagingPattern, SemanticString, Service,
@@ -28,14 +27,13 @@ use std::{
     sync::{Arc, Mutex as StdMutex, OnceLock, Weak, atomic::AtomicBool, atomic::Ordering},
 };
 use tokio::sync::{Mutex, RwLock};
-use up_rust::selected_wire_user_api::{UNativePrefixWireTransport, UWithNativePrefixWire};
-use up_rust::transport_implementer_api::UEncodedRxFrame;
-use up_rust::wire_implementer_api::UWire;
+use up_rust::UEncodedRxFrame;
 use up_rust::{
-    ExactUUri, LoanedPayload, PayloadLoanProvenance, PreparedTxLoanSpec, UCode,
-    UEncodedLoanedRxFrame, UEncodedZeroCopyListener, UFrameMetadata, UStatus, UTxBuffer,
-    UUninitTxBuffer, UUri, UZeroCopyTransportCore, UZeroCopyUninitTransportCore,
+    ExactUUri, Frame, FrameSink, LoanedPayload, PayloadLoanProvenance, UCode,
+    UEncodedLoanedRxFrame, UFrameMetadata, UStatus, UTxBuffer, UUninitTxBuffer, UUri,
 };
+#[cfg(feature = "benchmark-owned")]
+use up_rust::{UNativePrefixWireTransport, UWire};
 
 use crate::service_attributes::{attributes_match_source_filter, source_attribute_verifier};
 use crate::service_name_mapping::{
@@ -59,7 +57,9 @@ type BroadReceiverRegistry = StdMutex<Vec<Weak<Iceoryx2PubSubInner>>>;
 
 static BROAD_RECEIVER_REGISTRY: OnceLock<BroadReceiverRegistry> = OnceLock::new();
 
-/// Real iceoryx2 selected-wire transport core.
+/// Allocating native mechanics for encoded/owned selected-wire controls.
+///
+/// Prepared zero-allocation applications use [`crate::Iceoryx2PreparedCore`].
 #[derive(Clone)]
 pub struct Iceoryx2PubSub {
     inner: Arc<Iceoryx2PubSubInner>,
@@ -79,7 +79,7 @@ pub(crate) struct Iceoryx2PubSubInner {
     pull_receive_queue_state: Mutex<PullReceiveQueueState>,
     zero_copy_listeners: RwLock<Vec<ZeroCopyListenerRegistration>>,
     listener_worker_started: AtomicBool,
-    node: Node<ipc_threadsafe::Service>,
+    node: Arc<Node<ipc_threadsafe::Service>>,
 }
 
 #[derive(Default)]
@@ -104,7 +104,7 @@ impl PullReceiveQueueState {
 struct ZeroCopyListenerRegistration {
     source_filter: UUri,
     sink_filter: Option<UUri>,
-    listener: Arc<dyn UEncodedZeroCopyListener<Iceoryx2RxLease>>,
+    listener: Arc<dyn FrameSink<Iceoryx2RxLease>>,
     active: Arc<ListenerAdmission>,
     subscribers: HashMap<ServiceName, Arc<IpcSubscriber>>,
 }
@@ -113,7 +113,7 @@ impl ZeroCopyListenerRegistration {
     fn new(
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
-        listener: Arc<dyn UEncodedZeroCopyListener<Iceoryx2RxLease>>,
+        listener: Arc<dyn FrameSink<Iceoryx2RxLease>>,
     ) -> Self {
         Self {
             source_filter: source_filter.clone(),
@@ -128,7 +128,7 @@ impl ZeroCopyListenerRegistration {
         &self,
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
-        listener: &Arc<dyn UEncodedZeroCopyListener<Iceoryx2RxLease>>,
+        listener: &Arc<dyn FrameSink<Iceoryx2RxLease>>,
     ) -> bool {
         self.source_filter == *source_filter
             && self.sink_filter.as_ref() == sink_filter
@@ -170,14 +170,16 @@ impl Iceoryx2PubSub {
         if let Some(iceoryx2_config) = config.iceoryx2_config.as_ref().or(env_config.as_ref()) {
             node_builder = node_builder.config(iceoryx2_config);
         }
-        let node = node_builder
-            .create::<ipc_threadsafe::Service>()
-            .map_err(|error| {
-                UStatus::fail_with_code(
-                    UCode::Internal,
-                    format!("failed to create iceoryx2 node: {error}"),
-                )
-            })?;
+        let node = Arc::new(
+            node_builder
+                .create::<ipc_threadsafe::Service>()
+                .map_err(|error| {
+                    UStatus::fail_with_code(
+                        UCode::Internal,
+                        format!("failed to create iceoryx2 node: {error}"),
+                    )
+                })?,
+        );
         let inner = Arc::new(Iceoryx2PubSubInner {
             config,
             publishers: RwLock::new(HashMap::new()),
@@ -191,13 +193,17 @@ impl Iceoryx2PubSub {
         Ok(Self { inner })
     }
 
-    /// Wraps this core in the generic selected-wire adapter.
+    /// Wraps the allocating owned benchmark core in the selected-wire adapter.
+    #[cfg(feature = "benchmark-owned")]
     #[must_use]
-    pub fn with_selected_wire<W>(self, wire: W) -> UNativePrefixWireTransport<Self, W>
+    pub fn with_selected_wire<W>(
+        self,
+        wire: W,
+    ) -> UNativePrefixWireTransport<crate::BenchmarkOwnedIceoryx2Core, W>
     where
         W: UWire,
     {
-        self.into_native_prefix_wire_transport(wire)
+        crate::BenchmarkOwnedIceoryx2Core::new(self).with_selected_wire(wire)
     }
 
     fn env_iceoryx2_config() -> Option<Config> {
@@ -611,6 +617,7 @@ impl Iceoryx2PubSubInner {
                             let lease = lease_from_sample(
                                 sample,
                                 subscriber.clone(),
+                                Arc::clone(&self.node),
                                 registration.source_filter.clone(),
                                 registration.sink_filter.clone(),
                             )?;
@@ -642,9 +649,7 @@ impl Iceoryx2PubSubInner {
             }
         }
         for (listener, active, lease) in received {
-            active
-                .dispatch(|| listener.on_receive_encoded_zero_copy(lease))
-                .await;
+            active.dispatch(|| async { listener.push(lease) }).await;
         }
         Ok(())
     }
@@ -980,6 +985,7 @@ pub struct Iceoryx2RxLease {
 struct RetainedNativeSample {
     sample: IpcSample,
     _subscriber: Arc<IpcSubscriber>,
+    _node: Arc<Node<ipc_threadsafe::Service>>,
 }
 
 impl std::ops::Deref for RetainedNativeSample {
@@ -1125,18 +1131,46 @@ impl UEncodedLoanedRxFrame for Iceoryx2RxLease {
     }
 }
 
-#[async_trait]
-impl UZeroCopyTransportCore for Iceoryx2PubSub {
-    type Tx = Iceoryx2TxLoan;
-    type Rx = Iceoryx2RxLease;
+impl Frame for Iceoryx2RxLease {
+    fn encoded_metadata(&self) -> &[u8] {
+        UEncodedRxFrame::encoded_metadata(self)
+    }
 
-    async fn loan_prepared_tx(&self, spec: PreparedTxLoanSpec) -> Result<Self::Tx, UStatus> {
-        let payload_alignment = spec.payload_alignment_proof();
-        let (metadata, encoded_metadata, payload_len, _) = spec.into_parts();
+    fn payload(&self) -> Option<LoanedPayload<'_>> {
+        let metadata = UEncodedRxFrame::encoded_metadata(self);
+        if !crate::uprotocolheader::payload_present(metadata)? {
+            return None;
+        }
+        Some(LoanedPayload::new(
+            self.layout.payload(self.sample.payload()).ok()?,
+            PayloadLoanProvenance::OpaqueTransportLoan,
+        ))
+    }
+}
+
+impl Iceoryx2PubSub {
+    /// Loans initialized native storage for an allocating encoded control.
+    ///
+    /// The selected-wire adapter supplies the encoded metadata. This method may
+    /// create publishers/discovery state and is not a prepared zero-allocation path.
+    /// # Errors
+    /// Rejects invalid alignment, layout overflow or native capacity exhaustion.
+    pub async fn loan_encoded(
+        &self,
+        metadata: UFrameMetadata,
+        encoded_metadata: &[u8],
+        payload_len: usize,
+        alignment: usize,
+    ) -> Result<Iceoryx2TxLoan, UStatus> {
+        if !alignment.is_power_of_two() {
+            return Err(UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                "invalid payload alignment",
+            ));
+        }
         let source = metadata.source();
         let service_name =
             compute_service_name(source, metadata.sink(), MessagingPattern::PublishSubscribe)?;
-        let alignment = payload_alignment.as_usize();
         let sample_len =
             worst_case_aligned_sample_len(encoded_metadata.len(), payload_len, alignment)?;
         let publisher = self
@@ -1163,7 +1197,7 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
             .payload_mut()
             .get_mut(..encoded_metadata.len())
             .ok_or_else(|| UStatus::fail_with_code(UCode::Internal, "metadata range missing"))?
-            .copy_from_slice(&encoded_metadata);
+            .copy_from_slice(encoded_metadata);
         sample
             .user_header_mut()
             .write_payload_layout(layout)
@@ -1184,18 +1218,24 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
         })
     }
 
-    async fn send_prepared_zero_copy(&self, buffer: Self::Tx) -> Result<(), UStatus> {
+    /// Publishes one initialized allocating-control native sample.
+    /// # Errors
+    /// Returns a native delivery status without copying the payload.
+    pub async fn publish_encoded(&self, buffer: Iceoryx2TxLoan) -> Result<(), UStatus> {
         buffer.sample.send().map_err(|error| {
             UStatus::fail_with_code(UCode::Internal, format!("failed to send sample: {error}"))
         })?;
         Ok(())
     }
 
-    async fn receive_encoded_zero_copy(
+    /// Polls allocating-control discovery and returns a retained raw native sample.
+    /// # Errors
+    /// Returns NotFound when empty, or native/layout/mismatch-queue errors.
+    pub async fn receive_encoded(
         &self,
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
-    ) -> Result<Self::Rx, UStatus> {
+    ) -> Result<Iceoryx2RxLease, UStatus> {
         let exact_source_filter = source_filter.verify_no_wildcards().is_ok();
         let service_names = if exact_source_filter {
             vec![compute_service_name(
@@ -1247,6 +1287,7 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
                 let lease = lease_from_sample(
                     sample,
                     subscriber.clone(),
+                    Arc::clone(&self.inner.node),
                     source_filter.clone(),
                     sink_filter.cloned(),
                 )?;
@@ -1264,11 +1305,16 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
         ))
     }
 
-    async fn register_encoded_zero_copy_listener(
+    /// Attaches an allocating-control sink using dynamic service discovery.
+    ///
+    /// Prepared zero-allocation applications use `Iceoryx2PreparedCore` instead.
+    /// # Errors
+    /// Rejects duplicate registrations or native subscriber exhaustion.
+    pub async fn attach_encoded(
         &self,
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
-        listener: Arc<dyn UEncodedZeroCopyListener<Self::Rx>>,
+        listener: Arc<dyn FrameSink<Iceoryx2RxLease>>,
     ) -> Result<(), UStatus> {
         let exact_source_filter = source_filter.verify_no_wildcards().is_ok();
         let mut listeners = self.inner.zero_copy_listeners.write().await;
@@ -1309,11 +1355,14 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
         Ok(())
     }
 
-    async fn unregister_encoded_zero_copy_listener(
+    /// Closes and detaches one exact allocating-control sink registration.
+    /// # Errors
+    /// Returns NotFound, invalid timeout or bounded native quiescence errors.
+    pub async fn detach_encoded(
         &self,
         source_filter: &UUri,
         sink_filter: Option<&UUri>,
-        listener: Arc<dyn UEncodedZeroCopyListener<Self::Rx>>,
+        listener: Arc<dyn FrameSink<Iceoryx2RxLease>>,
     ) -> Result<(), UStatus> {
         let timeout = self.inner.config.listener_quiesce_timeout;
         if timeout.is_zero() || tokio::time::Instant::now().checked_add(timeout).is_none() {
@@ -1332,6 +1381,7 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
             ));
         };
         let registration = listeners.remove(index);
+        registration.listener.close();
         registration.active.cancel();
         drop(listeners);
         if !registration.active.is_current_callback() {
@@ -1361,20 +1411,26 @@ impl UZeroCopyTransportCore for Iceoryx2PubSub {
     }
 }
 
-#[async_trait]
-impl UZeroCopyUninitTransportCore for Iceoryx2PubSub {
-    type UninitTx = Iceoryx2UninitTxLoan;
-
-    async fn loan_prepared_uninit_tx(
+impl Iceoryx2PubSub {
+    /// Loans native storage for the allocating owned control path.
+    /// # Errors
+    /// Rejects invalid alignment, layout overflow or native capacity exhaustion.
+    pub async fn loan_encoded_uninit(
         &self,
-        spec: PreparedTxLoanSpec,
-    ) -> Result<Self::UninitTx, UStatus> {
-        let payload_alignment = spec.payload_alignment_proof();
-        let (metadata, encoded_metadata, payload_len, _) = spec.into_parts();
+        metadata: UFrameMetadata,
+        encoded_metadata: &[u8],
+        payload_len: usize,
+        alignment: usize,
+    ) -> Result<Iceoryx2UninitTxLoan, UStatus> {
+        if !alignment.is_power_of_two() {
+            return Err(UStatus::fail_with_code(
+                UCode::InvalidArgument,
+                "invalid payload alignment",
+            ));
+        }
         let source = metadata.source();
         let service_name =
             compute_service_name(source, metadata.sink(), MessagingPattern::PublishSubscribe)?;
-        let alignment = payload_alignment.as_usize();
         let sample_len =
             worst_case_aligned_sample_len(encoded_metadata.len(), payload_len, alignment)?;
         let publisher = self
@@ -1397,7 +1453,7 @@ impl UZeroCopyUninitTransportCore for Iceoryx2PubSub {
             sample.payload_mut().len(),
         )
         .map_err(frame_contract_error_to_status)?;
-        write_uninit_bytes(sample.payload_mut(), 0, &encoded_metadata)?;
+        write_uninit_bytes(sample.payload_mut(), 0, encoded_metadata)?;
         initialize_uninit_range(sample.payload_mut(), encoded_metadata.len(), payload_offset)?;
         sample
             .user_header_mut()
@@ -1419,12 +1475,14 @@ impl UZeroCopyUninitTransportCore for Iceoryx2PubSub {
 fn lease_from_sample(
     sample: IpcSample,
     subscriber: Arc<IpcSubscriber>,
+    node: Arc<Node<ipc_threadsafe::Service>>,
     source_filter_hint: UUri,
     sink_filter_hint: Option<UUri>,
 ) -> Result<Iceoryx2RxLease, UStatus> {
     let sample = RetainedNativeSample {
         sample,
         _subscriber: subscriber,
+        _node: node,
     };
     let layout = sample
         .user_header()
@@ -1593,10 +1651,20 @@ mod retained_native_tests {
             assert_eq!(original.len(), payload_len);
             assert_eq!(original_address % 8, 0);
             let weak = Arc::downgrade(&subscriber);
-            let lease = lease_from_sample(sample, subscriber.clone(), source, None).unwrap();
+            let lease = lease_from_sample(
+                sample,
+                subscriber.clone(),
+                Arc::clone(&core.inner.node),
+                source,
+                None,
+            )
+            .unwrap();
             drop(subscriber);
             assert!(weak.upgrade().is_some());
-            assert_eq!(lease.encoded_metadata().as_ptr() as usize, metadata_address);
+            assert_eq!(
+                UEncodedRxFrame::encoded_metadata(&lease).as_ptr() as usize,
+                metadata_address
+            );
             assert_eq!(
                 lease.try_contiguous_payload().unwrap().as_ptr() as usize,
                 original_address

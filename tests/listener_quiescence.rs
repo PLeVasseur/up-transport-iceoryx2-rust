@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
+// Copyright (c) 2026 Contributors to the Eclipse Foundation
 //! Real IPC admission, self-unregister and retained-sample timeout checks.
+#[path = "support/allocating_control.rs"]
+mod control;
 use async_trait::async_trait;
+use control::Core as Iceoryx2PubSub;
 use std::{
     future::{Future, poll_fn},
     sync::{Arc, Mutex, Weak},
@@ -9,13 +13,13 @@ use std::{
 };
 use tokio::sync::Notify;
 use up_rust::{
-    PayloadEncoding, ProtobufWire, UCode, UFrameMetadata, UFrameView, UNativePrefixWireTransport,
-    UStatus, UTxBuffer, UTxLoanSpec, UUri, UZeroCopyListener, UZeroCopyTransportImpl,
+    PayloadEncoding, ProtobufWire, UCode, UFrameMetadata, UFrameView, UStatus, UTxBuffer,
+    UTxLoanSpec, UUri,
 };
-use up_transport_iceoryx2_rust::{Iceoryx2PubSub, Iceoryx2PubSubConfig};
+use up_transport_iceoryx2_rust::Iceoryx2PubSubConfig;
 
-type Transport = UNativePrefixWireTransport<Iceoryx2PubSub, ProtobufWire>;
-type Frame = <Transport as UZeroCopyTransportImpl>::Rx;
+type Transport = control::Transport<ProtobufWire>;
+type Frame = control::Received<ProtobufWire>;
 
 fn pair(timeout: Duration) -> (Transport, Arc<Transport>, UUri) {
     let root = std::env::var("UP_ICEORYX2_TEST_ROOT").unwrap_or_else(|_| {
@@ -63,8 +67,8 @@ struct Blocking {
 }
 
 #[async_trait]
-impl UZeroCopyListener<Frame> for Blocking {
-    async fn on_receive_zero_copy(&self, frame: Frame) {
+impl control::Listener<ProtobufWire> for Blocking {
+    async fn on_frame(&self, frame: Frame) {
         *self.retained.lock().unwrap() = Some(frame);
         self.entered.notify_one();
         self.release.notified().await;
@@ -85,7 +89,7 @@ impl UZeroCopyListener<Frame> for Blocking {
 async fn unregister_waits_for_an_entered_native_callback() {
     let (publisher, subscriber, source) = pair(Duration::from_secs(5));
     let listener = Arc::new(Blocking::default());
-    let registration: Arc<dyn UZeroCopyListener<Frame>> = listener.clone();
+    let registration: Arc<dyn control::Listener<ProtobufWire>> = listener.clone();
     subscriber
         .register_validated_zero_copy_listener(&source, None, registration.clone())
         .await
@@ -116,7 +120,7 @@ async fn unregister_waits_for_an_entered_native_callback() {
 async fn timeout_does_not_revoke_the_native_sample() {
     let (publisher, subscriber, source) = pair(Duration::from_millis(20));
     let listener = Arc::new(Blocking::default());
-    let registration: Arc<dyn UZeroCopyListener<Frame>> = listener.clone();
+    let registration: Arc<dyn control::Listener<ProtobufWire>> = listener.clone();
     subscriber
         .register_validated_zero_copy_listener(&source, None, registration.clone())
         .await
@@ -158,9 +162,9 @@ struct SelfRemoving {
 }
 
 #[async_trait]
-impl UZeroCopyListener<Frame> for SelfRemoving {
-    async fn on_receive_zero_copy(&self, frame: Frame) {
-        let listener: Arc<dyn UZeroCopyListener<Frame>> = self.own.upgrade().unwrap();
+impl control::Listener<ProtobufWire> for SelfRemoving {
+    async fn on_frame(&self, frame: Frame) {
+        let listener: Arc<dyn control::Listener<ProtobufWire>> = self.own.upgrade().unwrap();
         let result = self
             .transport
             .upgrade()

@@ -35,6 +35,7 @@ mod classic;
 #[cfg(feature = "benchmark-owned")]
 mod owned;
 mod pool_prewarm;
+mod prepared;
 pub(crate) mod service_attributes;
 pub(crate) mod service_name_mapping;
 /// Construction of the classic message transport for supported messaging patterns.
@@ -46,6 +47,10 @@ pub(crate) mod workers;
 pub use iceoryx2::prelude::MessagingPattern;
 #[cfg(feature = "benchmark-owned")]
 pub use owned::{BenchmarkOwnedIceoryx2Core, Iceoryx2EncodedOwnedFrameLog, Iceoryx2OwnedCore};
+pub use prepared::{
+    Iceoryx2PreparedCore, Iceoryx2PreparedRoute, Iceoryx2PreparedRx, Iceoryx2PreparedStats,
+    Iceoryx2PreparedSubscription, Iceoryx2PreparedTx, Iceoryx2RouteReservation,
+};
 pub use uprotocolheader::{Iceoryx2PayloadLayout, UProtocolHeader};
 pub use utransport_pubsub::{
     Iceoryx2PubSub, Iceoryx2PubSubConfig, Iceoryx2PullMismatchQueueFullPolicy, Iceoryx2RxLease,

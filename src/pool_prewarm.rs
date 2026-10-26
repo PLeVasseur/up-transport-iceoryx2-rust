@@ -155,8 +155,8 @@ mod tests {
     use super::*;
     use std::io::Read;
     use up_rust::{
-        PayloadEncoding, ProtobufWire, UFrameMetadata, UTxBuffer, UTxLoanSpec, UUri,
-        UZeroCopyTransportImpl,
+        PayloadEncoding, ProtobufWire, UFrameFieldsMetadataCodec, UFrameMetadata, UTxBuffer, UUri,
+        UWireMetadataCodec, UWireMetadataContext,
     };
 
     #[test]
@@ -172,16 +172,20 @@ mod tests {
             .with_namespace(&root, &format!("preserve{}_", std::process::id()))
             .unwrap();
         config.require_exact_service_limits = true;
-        let transport = crate::Iceoryx2PubSub::try_with_config(config)
-            .unwrap()
-            .with_selected_wire(ProtobufWire);
+        let transport = crate::Iceoryx2PubSub::try_with_config(config).unwrap();
         let metadata =
             UFrameMetadata::publish(UUri::try_from_parts("preserve", 0x4210, 1, 0x9000).unwrap())
                 .with_payload_encoding(PayloadEncoding::PROTOBUF)
                 .build()
                 .unwrap();
+        let encoded = UFrameFieldsMetadataCodec
+            .encode_frame_metadata(
+                UWireMetadataContext::from_wire::<ProtobufWire, UFrameFieldsMetadataCodec>(),
+                &metadata,
+            )
+            .unwrap();
         let mut loan = transport
-            .loan_validated_tx(UTxLoanSpec::payload(metadata, 16, 8).unwrap())
+            .loan_encoded(metadata, &encoded, 16, 8)
             .await
             .unwrap();
         loan.payload_mut().fill(0xa5);

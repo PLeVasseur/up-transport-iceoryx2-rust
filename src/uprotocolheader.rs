@@ -250,6 +250,40 @@ pub(crate) fn frame_contract_error_to_status(error: impl fmt::Display) -> UStatu
     UStatus::fail_with_code(UCode::InvalidArgument, error.to_string())
 }
 
+/// Locates the field block only to distinguish absent from present-empty storage.
+/// This does not match or approve any wire/family/layout identity. The SDK's
+/// prepared admission validates those namespaces before exposing a public lease.
+pub(crate) fn payload_present(metadata: &[u8]) -> Option<bool> {
+    fn identity_end(bytes: &[u8], start: usize) -> Option<usize> {
+        let end = match *bytes.get(start)? {
+            0 => start.checked_add(3)?,
+            1 => {
+                let word_end = start.checked_add(5)?;
+                let len = u32::from_le_bytes(bytes.get(start + 1..word_end)?.try_into().ok()?);
+                word_end.checked_add(usize::try_from(len).ok()?)?
+            }
+            _ => return None,
+        };
+        bytes.get(..end)?;
+        Some(end)
+    }
+    if metadata.get(..4)? != b"UPWM" {
+        return None;
+    }
+    let mut end = identity_end(metadata, 4)?.checked_add(2)?;
+    end = identity_end(metadata, end)?;
+    end = identity_end(metadata, end)?.checked_add(2)?;
+    let header = up_rust::parse_header(
+        metadata.get(..end)?,
+        metadata,
+        &up_rust::HeaderLimits {
+            max_token_len: u16::MAX as usize,
+        },
+    )
+    .ok()?;
+    Some(header.payload_encoding.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

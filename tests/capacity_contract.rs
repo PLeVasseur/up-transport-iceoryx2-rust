@@ -1,6 +1,9 @@
 // Copyright (c) 2026 Contributors to the Eclipse Foundation
 // SPDX-License-Identifier: Apache-2.0
 //! Actual native service/loan limits, including mismatched existing services.
+#[path = "support/allocating_control.rs"]
+mod control;
+use control::Core as Iceoryx2PubSub;
 use iceoryx2::{
     node::NodeBuilder,
     prelude::ServiceName,
@@ -12,11 +15,10 @@ use std::{
     time::Duration,
 };
 use up_rust::{
-    ExactUUri, PayloadEncoding, ProtobufWire, UCode, UFrameMetadata, UFrameView,
-    UNativePrefixWireTransport, UTxBuffer, UTxLoanSpec, UUri, UZeroCopyListener,
-    UZeroCopyTransportImpl,
+    ExactUUri, PayloadEncoding, ProtobufWire, UCode, UFrameMetadata, UFrameView, UTxBuffer,
+    UTxLoanSpec, UUri,
 };
-use up_transport_iceoryx2_rust::{Iceoryx2PubSub, Iceoryx2PubSubConfig, UProtocolHeader};
+use up_transport_iceoryx2_rust::{Iceoryx2PubSubConfig, UProtocolHeader};
 
 static SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
@@ -40,9 +42,9 @@ async fn logical_filters_delegate_to_independent_native_subscribers() {
     let (a, mut a_rx) = tokio::sync::mpsc::unbounded_channel();
     let (b, mut b_rx) = tokio::sync::mpsc::unbounded_channel();
     let (directed, mut directed_rx) = tokio::sync::mpsc::unbounded_channel();
-    let a: Arc<dyn UZeroCopyListener<Frame>> = Arc::new(Capture(a));
-    let b: Arc<dyn UZeroCopyListener<Frame>> = Arc::new(Capture(b));
-    let directed: Arc<dyn UZeroCopyListener<Frame>> = Arc::new(Capture(directed));
+    let a: Arc<dyn control::Listener<ProtobufWire>> = Arc::new(Capture(a));
+    let b: Arc<dyn control::Listener<ProtobufWire>> = Arc::new(Capture(b));
+    let directed: Arc<dyn control::Listener<ProtobufWire>> = Arc::new(Capture(directed));
     let sink = UUri::try_from_parts("receiver", 0x4210, 1, 0).unwrap();
     receiver
         .register_validated_zero_copy_listener(&source(), None, a.clone())
@@ -131,7 +133,7 @@ async fn retained_sample_under_publisher_pressure(listener_mode: bool) {
         .unwrap()
         .with_selected_wire(ProtobufWire);
     let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
-    let listener: Arc<dyn UZeroCopyListener<Frame>> = Arc::new(Capture(tx));
+    let listener: Arc<dyn control::Listener<ProtobufWire>> = Arc::new(Capture(tx));
     if listener_mode {
         receiver
             .register_validated_zero_copy_listener(&source(), None, listener.clone())
@@ -242,14 +244,13 @@ async fn retained_pull_sample_survives_continued_publication_after_endpoint_drop
     retained_sample_under_publisher_pressure(false).await;
 }
 
-type Transport = UNativePrefixWireTransport<Iceoryx2PubSub, ProtobufWire>;
-type Frame = <Transport as UZeroCopyTransportImpl>::Rx;
+type Frame = control::Received<ProtobufWire>;
 
 struct Capture(tokio::sync::mpsc::UnboundedSender<Frame>);
 
 #[async_trait::async_trait]
-impl UZeroCopyListener<Frame> for Capture {
-    async fn on_receive_zero_copy(&self, frame: Frame) {
+impl control::Listener<ProtobufWire> for Capture {
+    async fn on_frame(&self, frame: Frame) {
         self.0.send(frame).unwrap();
     }
 }
@@ -277,8 +278,8 @@ async fn strict_two_subscriber_fanout_retains_independent_native_loans() {
         .with_selected_wire(ProtobufWire);
     let (first_tx, mut first_rx) = tokio::sync::mpsc::unbounded_channel();
     let (second_tx, mut second_rx) = tokio::sync::mpsc::unbounded_channel();
-    let first_listener: Arc<dyn UZeroCopyListener<Frame>> = Arc::new(Capture(first_tx));
-    let second_listener: Arc<dyn UZeroCopyListener<Frame>> = Arc::new(Capture(second_tx));
+    let first_listener: Arc<dyn control::Listener<ProtobufWire>> = Arc::new(Capture(first_tx));
+    let second_listener: Arc<dyn control::Listener<ProtobufWire>> = Arc::new(Capture(second_tx));
     first
         .register_validated_zero_copy_listener(&source(), None, first_listener.clone())
         .await

@@ -8,6 +8,19 @@ See the [listener lifecycle guide](docs/listener-lifecycle.md) for configuration
 
 ## Transport APIs
 
+`Iceoryx2PreparedCore` implements the SDK's `PreparedTransportCore`. Create its
+finite physical catalog with `Iceoryx2RouteReservation`, static native slices and
+explicit route/registration capacities. SDK routes resolve those existing
+publishers; synchronous loan/publish writes metadata and payload in native slots.
+Attach creates a native event wait set and independent subscribers; the SDK owns
+the generic async handler worker. See the [prepared-core guide](docs/prepared.md)
+for setup, first-contact RPC, allocation measurement and token-wipe limits.
+Its native outcome counters keep physical rejection/error/borrowed-credit
+observations distinct from SDK admission and application inbox drops.
+
+`Iceoryx2PubSub` supplies the allocating owned benchmark control's native mechanics.
+Its dynamic discovery and collection work is separate from the prepared path.
+
 Each listener registration gets a native subscriber per matching service.
 iceoryx2 performs shared-chunk fan-out and each callback owns an independent native
 sample. The SDK checks full source/sink filters. See
@@ -28,20 +41,22 @@ loan admission, preserving bytes and native slot/TX limits. See
 
 The [public API and placement guide](docs/api-contract.md) explains header/layout
 fields and mismatch diagnostics. Public documentation uses `missing_docs = "deny"`.
-`UProtocolHeader::reserved` explicitly occupies bytes1–7 and must be zero. Header
+`UProtocolHeader::reserved` explicitly occupies bytes 1–7 and must be zero. Header
 writers initialize it; receivers reject nonzero values. Raw producers initialize
-the new field while the40-byte, alignment8 ABI and physical major version remain
+the new field while the 40-byte, alignment 8 ABI and physical major version remain
 unchanged. The guide lists every offset and a checked construction example.
 
 `UTransportIceoryx2` preserves the classic protobuf-serialized `UTransport`
-entry point. `Iceoryx2PubSub` is the real shared-memory selected-wire core. Wrap
-it with `with_selected_wire` to compose a wire selected by the application.
+entry point. `Iceoryx2PreparedCore` is the setup-reserved shared-memory core for
+the SDK's concrete prepared routes and generic registrations. The feature-gated
+`BenchmarkOwnedIceoryx2Core::with_selected_wire` composes the allocating owned
+control over `Iceoryx2PubSub` mechanics.
 
-The selected-wire core stores encoded frame metadata in the sample prefix and
-uses the iceoryx2 user header only for physical payload placement. Source URI
-provenance is carried as immutable iceoryx2 service attributes and checked
-before a subscriber attaches. Safe receive always runs selected-wire decoding
-and filter validation before exposing a frame.
+Both paths store encoded metadata in the sample prefix and use the iceoryx2 user
+header for physical placement. Prepared physical addressing follows the finite
+catalog; the SDK validates carried metadata, selected-wire identity and decoded
+source/sink filters before exposing a checked public lease. Dynamic owned
+controls additionally use immutable native service attributes for discovery.
 
 Receive samples retain their backing subscriber state after listener unregister
 and transport destruction. Pending poller snapshots are invalidated when their
@@ -63,9 +78,11 @@ different uProtocol authorities alone do not provide that isolation. Multiple
 instances in one process may use different namespaces and carry identical
 logical source/sink URIs while remaining physically separate.
 
-Real IPC tests default to `target/r19-iceoryx2-runtime`. Set
-`UP_ICEORYX2_TEST_ROOT` to a shorter persistent path when validating from a
-deep package extraction directory.
+Set `UP_ICEORYX2_TEST_ROOT` to a short, isolated absolute path for native tests
+and the Criterion benchmark. Native Unix event sockets include the service
+directory, namespace prefix, native ID and suffix; a deep package path can exceed
+the operating system's socket-path limit. Set `UP_ICEORYX2_FINCORE_BIN` to the
+actual util-linux `fincore` executable for the Linux backing-page tests.
 
 ## Feature-Gated Owned Support
 

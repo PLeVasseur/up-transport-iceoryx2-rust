@@ -5,12 +5,15 @@
 // ################################################################################
 
 //! Real IPC proofs for selected-wire identity, native loans, filters and retained ownership.
+#[path = "support/allocating_control.rs"]
+mod control;
 use std::{
     sync::{Arc, Mutex as StdMutex, atomic::AtomicU64, atomic::Ordering},
     time::Duration,
 };
 
 use async_trait::async_trait;
+use control::Core as Iceoryx2PubSub;
 use iceoryx2::{
     node::NodeBuilder,
     prelude::{AllocationStrategy, SemanticString, ServiceName},
@@ -18,23 +21,21 @@ use iceoryx2::{
 };
 use iceoryx2_bb_system_types::{file_name::FileName, path::Path};
 use tokio::sync::{Mutex as TokioMutex, MutexGuard};
-use up_rust::selected_wire_user_api::UNativePrefixWireTransport;
 use up_rust::{
-    ExactUUri, NativePrefixFrameMetadataCodec, PROTOBUF_PAYLOAD_FAMILY_ID, PayloadEncoding,
-    PayloadLoanProvenance, ProtobufWire, UCode, UEncodedLoanedRxFrame, UFrameMetadata, UFrameView,
-    UStatus, UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UWire, UWireMetadataCodec,
-    UZeroCopyListener, UZeroCopyTransportImpl, UZeroCopyUninitTransportImpl, WireIdentity,
+    ExactUUri, PROTOBUF_PAYLOAD_FAMILY_ID, PayloadEncoding, PayloadLoanProvenance, ProtobufWire,
+    UCode, UEncodedLoanedRxFrame, UFrameFieldsMetadataCodec, UFrameMetadata, UFrameView, UStatus,
+    UTxBuffer, UTxLoanSpec, UUninitTxBuffer, UUri, UWire, UWireMetadataCodec, WireIdentity,
     XCDR_V2_WIRE_ID,
 };
-use up_transport_iceoryx2_rust::{Iceoryx2PubSub, Iceoryx2PubSubConfig, UProtocolHeader};
+use up_transport_iceoryx2_rust::{Iceoryx2PubSubConfig, UProtocolHeader};
 use up_wire_xcdrv2::{VEHICLE_SIGNAL_V1_GOLDEN_BYTES, XCDR_V2_PAYLOAD_ENCODING, XcdrV2Wire};
 
 static ICEORYX2_TEST_MUTEX: TokioMutex<()> = TokioMutex::const_new(());
 static TEST_CONFIG_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-type NativeIceoryx2Transport<W> = UNativePrefixWireTransport<Iceoryx2PubSub, W>;
+type NativeIceoryx2Transport<W> = control::Transport<W>;
 type XcdrV2Iceoryx2Transport = NativeIceoryx2Transport<XcdrV2Wire>;
-type XcdrV2Iceoryx2Rx = <XcdrV2Iceoryx2Transport as UZeroCopyTransportImpl>::Rx;
+type XcdrV2Iceoryx2Rx = control::Received<XcdrV2Wire>;
 
 async fn iceoryx2_test_guard() -> MutexGuard<'static, ()> {
     ICEORYX2_TEST_MUTEX.lock().await
@@ -180,10 +181,7 @@ async fn prepared_metadata_passes_through_for_required_wires() {
         .with_native_payload_identity(agreement.identity_for(&representation).unwrap())
         .build()
         .unwrap();
-    let native = up_rust::UWithNativePrefixWire::into_stable_container_transport(
-        core(&test_config()),
-        agreement,
-    );
+    let native = core(&test_config()).with_stable_wire(agreement);
     assert_prepared_metadata(native, native_metadata).await;
 
     assert_prepared_metadata(
@@ -210,9 +208,9 @@ async fn assert_prepared_metadata<W>(
         tx.encoded_metadata().len()
     );
     assert_eq!(tx.header().payload_len, 4);
-    let decoded = NativePrefixFrameMetadataCodec
+    let decoded = UFrameFieldsMetadataCodec
         .decode_frame_metadata(
-            up_rust::UWireMetadataContext::from_wire::<W, NativePrefixFrameMetadataCodec>(),
+            up_rust::UWireMetadataContext::from_wire::<W, UFrameFieldsMetadataCodec>(),
             tx.encoded_metadata(),
         )
         .expect("decode");
@@ -598,8 +596,8 @@ impl CountingListener {
 }
 
 #[async_trait]
-impl UZeroCopyListener<XcdrV2Iceoryx2Rx> for CountingListener {
-    async fn on_receive_zero_copy(&self, frame: XcdrV2Iceoryx2Rx) {
+impl control::Listener<XcdrV2Wire> for CountingListener {
+    async fn on_frame(&self, frame: XcdrV2Iceoryx2Rx) {
         self.payloads
             .lock()
             .expect("payload lock")
@@ -610,8 +608,8 @@ impl UZeroCopyListener<XcdrV2Iceoryx2Rx> for CountingListener {
 struct RetainingListener(tokio::sync::mpsc::UnboundedSender<XcdrV2Iceoryx2Rx>);
 
 #[async_trait]
-impl UZeroCopyListener<XcdrV2Iceoryx2Rx> for RetainingListener {
-    async fn on_receive_zero_copy(&self, frame: XcdrV2Iceoryx2Rx) {
+impl control::Listener<XcdrV2Wire> for RetainingListener {
+    async fn on_frame(&self, frame: XcdrV2Iceoryx2Rx) {
         let _ = self.0.send(frame);
     }
 }
@@ -624,8 +622,7 @@ async fn receive_lease_retains_native_storage_after_unregister_and_transport_dro
     let publisher = core(&config).with_selected_wire(XcdrV2Wire);
     let subscriber = core(&config).with_selected_wire(XcdrV2Wire);
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let listener: Arc<dyn UZeroCopyListener<XcdrV2Iceoryx2Rx>> =
-        Arc::new(RetainingListener(sender));
+    let listener: Arc<dyn control::Listener<XcdrV2Wire>> = Arc::new(RetainingListener(sender));
     subscriber
         .register_validated_zero_copy_listener(&source, None, listener.clone())
         .await
@@ -667,8 +664,8 @@ struct PausedFirstListener {
 }
 
 #[async_trait]
-impl UZeroCopyListener<XcdrV2Iceoryx2Rx> for PausedFirstListener {
-    async fn on_receive_zero_copy(&self, _frame: XcdrV2Iceoryx2Rx) {
+impl control::Listener<XcdrV2Wire> for PausedFirstListener {
+    async fn on_frame(&self, _frame: XcdrV2Iceoryx2Rx) {
         if self.calls.fetch_add(1, Ordering::SeqCst) == 0 {
             self.entered.notify_one();
             self.resume.notified().await;
@@ -686,7 +683,7 @@ async fn unregister_invalidates_already_collected_callback_deliveries() {
     let publisher = core(&config).with_selected_wire(XcdrV2Wire);
     let subscriber = core(&config).with_selected_wire(XcdrV2Wire);
     let first = Arc::new(PausedFirstListener::default());
-    let first_registration: Arc<dyn UZeroCopyListener<XcdrV2Iceoryx2Rx>> = first.clone();
+    let first_registration: Arc<dyn control::Listener<XcdrV2Wire>> = first.clone();
     let removed = Arc::new(CountingListener::default());
     subscriber
         .register_validated_zero_copy_listener(&source, None, first_registration.clone())
@@ -776,8 +773,7 @@ async fn explicit_readiness_waits_for_actual_subscription_before_first_send() {
         "the publisher must not finish before a real subscriber exists"
     );
     let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-    let listener: Arc<dyn UZeroCopyListener<XcdrV2Iceoryx2Rx>> =
-        Arc::new(RetainingListener(sender));
+    let listener: Arc<dyn control::Listener<XcdrV2Wire>> = Arc::new(RetainingListener(sender));
     subscriber
         .register_validated_zero_copy_listener(&source, None, listener.clone())
         .await
@@ -918,8 +914,7 @@ async fn cross_process_first_send(test_name: &str, payload: &[u8], dynamic: bool
         config.global.prefix = FileName::new(prefix.as_bytes()).unwrap();
         let subscriber = core(&config).with_selected_wire(XcdrV2Wire);
         let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
-        let listener: Arc<dyn UZeroCopyListener<XcdrV2Iceoryx2Rx>> =
-            Arc::new(RetainingListener(sender));
+        let listener: Arc<dyn control::Listener<XcdrV2Wire>> = Arc::new(RetainingListener(sender));
         subscriber
             .register_validated_zero_copy_listener(&UUri::any(), sink.as_ref(), listener.clone())
             .await

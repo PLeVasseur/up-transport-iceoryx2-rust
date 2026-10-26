@@ -11,16 +11,16 @@ use std::{collections::VecDeque, sync::Arc};
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::Mutex;
-use up_rust::selected_wire_user_api::{UNativePrefixWireTransport, UWithNativePrefixWire};
-use up_rust::transport_implementer_api::{
+use up_rust::UWire;
+use up_rust::{
     EncodedOwnedFrame, PreparedOwnedFrame, UEncodedOwnedListener, UEncodedRxFrame,
     UOwnedTransportCore,
 };
-use up_rust::wire_implementer_api::UWire;
 use up_rust::{
-    PreparedTxLoanSpec, UCode, UEncodedZeroCopyListener, UStatus, UTxBuffer, UUri,
-    UZeroCopyTransportCore,
+    FrameSink, OverflowPolicy, Registration, RegistrationConfig, RegistrationHandler, UCode,
+    UStatus, UTxBuffer, UUri,
 };
+use up_rust::{UNativePrefixWireTransport, UWithNativePrefixWire};
 
 use crate::{Iceoryx2PubSub, Iceoryx2RxLease};
 
@@ -67,16 +67,16 @@ struct OwnedLoopbackListenerRegistration {
     source_filter: UUri,
     sink_filter: Option<UUri>,
     owned_listener: Arc<dyn UEncodedOwnedListener>,
-    zero_copy_listener: Arc<OwnedLoopbackListener>,
+    inbox: Arc<dyn FrameSink<Iceoryx2RxLease>>,
+    worker: Registration<Iceoryx2RxLease>,
 }
 
 struct OwnedLoopbackListener {
     listener: Arc<dyn UEncodedOwnedListener>,
 }
 
-#[async_trait]
-impl UEncodedZeroCopyListener<Iceoryx2RxLease> for OwnedLoopbackListener {
-    async fn on_receive_encoded_zero_copy(&self, frame: Iceoryx2RxLease) {
+impl RegistrationHandler<Iceoryx2RxLease> for OwnedLoopbackListener {
+    async fn on_receive(&mut self, frame: Iceoryx2RxLease) {
         if let Ok(frame) = lease_to_encoded_owned(&frame) {
             self.listener.on_receive_encoded_owned(frame).await;
         }
@@ -87,17 +87,19 @@ impl UEncodedZeroCopyListener<Iceoryx2RxLease> for OwnedLoopbackListener {
 impl UOwnedTransportCore for BenchmarkOwnedIceoryx2Core {
     async fn send_prepared_owned(&self, frame: PreparedOwnedFrame) -> Result<(), UStatus> {
         let payload_len = frame.payload().map_or(0, Bytes::len);
-        let spec = PreparedTxLoanSpec::from_encoded_parts(
-            frame.metadata().clone(),
-            frame.encoded_metadata().to_vec(),
-            payload_len,
-            1,
-        )?;
-        let mut loan = self.inner.loan_prepared_tx(spec).await?;
+        let mut loan = self
+            .inner
+            .loan_encoded(
+                frame.metadata().clone(),
+                frame.encoded_metadata(),
+                payload_len,
+                1,
+            )
+            .await?;
         if let Some(payload) = frame.payload() {
             loan.payload_mut().copy_from_slice(payload);
         }
-        self.inner.send_prepared_zero_copy(loan).await
+        self.inner.publish_encoded(loan).await
     }
 
     async fn receive_encoded_owned(
@@ -107,7 +109,7 @@ impl UOwnedTransportCore for BenchmarkOwnedIceoryx2Core {
     ) -> Result<EncodedOwnedFrame, UStatus> {
         let frame = self
             .inner
-            .receive_encoded_zero_copy(source_filter, sink_filter)
+            .receive_encoded(source_filter, sink_filter)
             .await?;
         lease_to_encoded_owned(&frame)
     }
@@ -118,15 +120,22 @@ impl UOwnedTransportCore for BenchmarkOwnedIceoryx2Core {
         sink_filter: Option<&UUri>,
         listener: Arc<dyn UEncodedOwnedListener>,
     ) -> Result<(), UStatus> {
-        let zero_copy_listener = Arc::new(OwnedLoopbackListener {
-            listener: listener.clone(),
-        });
+        let worker = Registration::new(
+            RegistrationConfig {
+                capacity: 1,
+                overflow: OverflowPolicy::Block {
+                    deadline: std::time::Duration::from_secs(5),
+                },
+            },
+            OwnedLoopbackListener {
+                listener: listener.clone(),
+            },
+            || {},
+        )
+        .map_err(|error| UStatus::fail_with_code(UCode::ResourceExhausted, error.to_string()))?;
+        let inbox: Arc<dyn FrameSink<Iceoryx2RxLease>> = worker.inbox();
         self.inner
-            .register_encoded_zero_copy_listener(
-                source_filter,
-                sink_filter,
-                zero_copy_listener.clone(),
-            )
+            .attach_encoded(source_filter, sink_filter, inbox.clone())
             .await?;
         self.listeners
             .lock()
@@ -135,7 +144,8 @@ impl UOwnedTransportCore for BenchmarkOwnedIceoryx2Core {
                 source_filter: source_filter.clone(),
                 sink_filter: sink_filter.cloned(),
                 owned_listener: listener,
-                zero_copy_listener,
+                inbox,
+                worker,
             });
         Ok(())
     }
@@ -161,12 +171,13 @@ impl UOwnedTransportCore for BenchmarkOwnedIceoryx2Core {
             listeners.remove(index)
         };
         self.inner
-            .unregister_encoded_zero_copy_listener(
-                source_filter,
-                sink_filter,
-                registration.zero_copy_listener,
-            )
+            .detach_encoded(source_filter, sink_filter, registration.inbox)
+            .await?;
+        registration
+            .worker
+            .stop()
             .await
+            .map_err(|error| UStatus::fail_with_code(UCode::Internal, error.to_string()))
     }
 }
 

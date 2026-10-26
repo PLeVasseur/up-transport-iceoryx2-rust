@@ -34,14 +34,15 @@ hostname = "0.4.1"
 iceoryx2 = "=0.9.2"
 iceoryx2-bb-container = "=0.9.2"
 iceoryx2-bb-system-types = "=0.9.2"
+iceoryx2-bb-posix = "=0.9.2"
 protobuf = "3.7.2"
 tokio = { version = "1.47.1", features = ["macros", "rt-multi-thread", "signal", "sync", "time"] }
-up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "c9be9db4565b43f463734f3a335ea4902cb46a62", default-features = false, features = ["protobuf-wire", "selected-wire-user-api", "transport-implementer-api", "wire-implementer-api", "zero-copy-transport", "util"] }
+up-rust = { version = "=0.10.0-SNAPSHOT", git = "https://github.com/PLeVasseur/up-rust.git", rev = "75a5dd25dac271161d4709a0559b788befa21b67", default-features = false, features = ["protobuf-wire", "selected-wire-user-api", "selected-wire-transport-core", "transport-implementer-api", "wire-implementer-api", "zero-copy-transport", "util"] }
 
 [dev-dependencies]
 criterion = { version = "0.5.1", features = ["csv_output"] }
 serde_json = "1.0.145"
-up-wire-xcdrv2 = { version = "=0.0.0", git = "https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "74bb7b08b0d3f1ffc966902e48376ffe0b7024bb" }
+up-wire-xcdrv2 = { version = "=0.1.0", git = "https://github.com/PLeVasseur/up-wire-xcdrv2-rust.git", rev = "2eccbb9c50095d488e5586e0e82d12b5bceb2763" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 rustix = { version = "=0.38.44", features = ["fs"] }
@@ -49,6 +50,10 @@ rustix = { version = "=0.38.44", features = ["fs"] }
 [[test]]
 name = "iceoryx2_owned_wire"
 required-features = ["benchmark-owned"]
+
+[[test]]
+name = "prepared_native_allocation"
+harness = false
 
 [package.metadata.docs.rs]
 all-features = true

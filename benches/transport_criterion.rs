@@ -10,20 +10,25 @@ use std::{sync::atomic::AtomicU64, sync::atomic::Ordering, time::Duration};
 use criterion::{Criterion, black_box, criterion_main};
 use iceoryx2::prelude::SemanticString;
 use iceoryx2_bb_system_types::{file_name::FileName, path::Path};
+use std::sync::Arc;
 use tokio::runtime::Runtime;
 use up_rust::{
-    PayloadEncoding, ProtobufWire, UFrameMetadata, UFrameView, UTxBuffer, UTxLoanSpec, UUri,
-    UZeroCopyTransportImpl,
+    Frame, OpaqueTemplate, OverflowPolicy, PayloadEncoding, PreparedTransportCore, ProtobufWire,
+    RegistrationConfig, RegistrationInbox, RouteConfig, RouteLimits, TxHeaderParts, UFrameMetadata,
+    UUri,
 };
-use up_transport_iceoryx2_rust::{Iceoryx2PubSub, Iceoryx2PubSubConfig};
+use up_transport_iceoryx2_rust::{
+    Iceoryx2PreparedCore, Iceoryx2PreparedRx, Iceoryx2PubSubConfig, Iceoryx2RouteReservation,
+};
 
 const PAYLOAD_LEN: usize = 256;
 static BENCH_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
 fn benchmark_config() -> iceoryx2::prelude::Config {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("target")
-        .join("i2-bench");
+    let root = std::path::PathBuf::from(
+        std::env::var("UP_ICEORYX2_TEST_ROOT")
+            .expect("provide a short isolated native event root for the benchmark"),
+    );
     std::fs::create_dir_all(&root).expect("create durable iceoryx2 benchmark root");
     let sequence = BENCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
     let prefix = format!("b{}_{}", std::process::id(), sequence);
@@ -41,41 +46,52 @@ fn source() -> UUri {
     UUri::try_from_parts(&authority, 0x4210, 1, 0x9000).expect("benchmark source URI")
 }
 
-async fn receive_payload(
-    transport: &up_rust::UNativePrefixWireTransport<Iceoryx2PubSub, ProtobufWire>,
-    source: &UUri,
-) -> usize {
-    for _ in 0..100 {
-        match transport.receive_validated_zero_copy(source, None).await {
-            Ok(frame) => return frame.payload_len(),
-            Err(status) if status.code() == up_rust::UCode::NotFound => {
-                tokio::time::sleep(Duration::from_micros(50)).await;
-            }
-            Err(status) => panic!("iceoryx2 benchmark receive failed: {status:?}"),
-        }
-    }
-    panic!("iceoryx2 benchmark receive timed out")
-}
-
 fn selected_wire_round_trip(c: &mut Criterion) {
     let runtime = Runtime::new().expect("benchmark runtime");
     let config = benchmark_config();
-    let publisher = Iceoryx2PubSub::with_config(
-        Iceoryx2PubSubConfig::static_allocation(64 * 1024).with_iceoryx2_config(config.clone()),
-    )
-    .with_selected_wire(ProtobufWire);
-    let subscriber = Iceoryx2PubSub::with_config(
-        Iceoryx2PubSubConfig::static_allocation(64 * 1024).with_iceoryx2_config(config),
-    )
-    .with_selected_wire(ProtobufWire);
     let source = source();
-    let first_receive = runtime.block_on(subscriber.receive_validated_zero_copy(&source, None));
-    assert_eq!(
-        first_receive
-            .expect_err("subscriber should initially be empty")
-            .code(),
-        up_rust::UCode::NotFound
+    let limits = RouteLimits {
+        max_metadata_len: 1024,
+        max_payload_len: PAYLOAD_LEN,
+        payload_alignment: 8,
+    };
+    let core = Arc::new(
+        Iceoryx2PreparedCore::new(
+            Iceoryx2PubSubConfig::static_allocation(64 * 1024).with_iceoryx2_config(config),
+            &[Iceoryx2RouteReservation {
+                source: source.clone(),
+                sink: None,
+                limits,
+            }],
+            1,
+            1,
+        )
+        .unwrap(),
     );
+    let inbox = Arc::new(
+        RegistrationInbox::<Iceoryx2PreparedRx>::new(RegistrationConfig {
+            capacity: 1,
+            overflow: OverflowPolicy::Block {
+                deadline: Duration::from_secs(5),
+            },
+        })
+        .unwrap(),
+    );
+    let mut subscription = runtime
+        .block_on(core.attach(&source, None, inbox.clone()))
+        .unwrap();
+    runtime.block_on(core.wait_ready()).unwrap();
+    let publisher = OpaqueTemplate::for_wire::<ProtobufWire>()
+        .unwrap()
+        .route(
+            Arc::clone(&core),
+            source.clone(),
+            None,
+            limits,
+            RouteConfig::default(),
+        )
+        .unwrap();
+    let payload = [0x5a; PAYLOAD_LEN];
 
     c.bench_function("selected_wire_protobuf_real_shm_256b", |b| {
         b.iter(|| {
@@ -84,22 +100,20 @@ fn selected_wire_round_trip(c: &mut Criterion) {
                     .with_payload_encoding(PayloadEncoding::PROTOBUF)
                     .build()
                     .expect("benchmark metadata");
-                let mut tx = publisher
-                    .loan_validated_tx(
-                        UTxLoanSpec::payload(metadata, PAYLOAD_LEN, 1)
-                            .expect("benchmark loan spec"),
-                    )
-                    .await
-                    .expect("benchmark loan");
-                tx.payload_mut().fill(0x5a);
                 publisher
-                    .send_validated_zero_copy(tx)
-                    .await
+                    .send_bytes(TxHeaderParts::from(&metadata), Some(&payload))
                     .expect("benchmark send");
-                black_box(receive_payload(&subscriber, &source).await);
+                let frame = tokio::time::timeout(Duration::from_secs(5), inbox.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+                let bytes = frame.payload().unwrap().bytes();
+                assert_eq!(bytes, &payload);
+                black_box(bytes.len());
             });
         });
     });
+    core.detach(&mut subscription).unwrap();
 }
 
 fn benches() {

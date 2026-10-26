@@ -1,5 +1,14 @@
 # Native listener admission and quiescence
 
+Prepared registrations use a synchronous `FrameSink` plus the SDK's generic
+`Registration` worker. `WireRegistration` closes admission before native detach,
+then drains or cancels application work separately. The binding joins its event
+pump without revoking independently retained samples or subscriber ports. No
+per-message task or dynamic listener future is created. See
+[prepared registration](prepared.md#event-wait-set-and-ordered-delivery).
+
+The dynamic `Iceoryx2PubSub` mechanics below support allocating owned controls.
+
 `Iceoryx2PubSub` uses one SDK admission gate per selected-wire registration.
 Unregister removes the registration and closes admission under the registry lock,
 then releases that lock before waiting for entered callbacks. The configured
