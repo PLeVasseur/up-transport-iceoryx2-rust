@@ -18,6 +18,7 @@ const ATTR_SOURCE_INSTANCE: &str = "up.source.instance";
 const ATTR_SOURCE_VERSION: &str = "up.source.version";
 const ATTR_SOURCE_RESOURCE: &str = "up.source.resource";
 const TRANSPORT_VALUE: &str = "uprotocol";
+const ATTR_SHARED_REQUEST: &str = "up.request.shared";
 
 pub(crate) fn source_attribute_verifier(source: &UUri) -> Result<AttributeVerifier, UStatus> {
     let mut verifier = AttributeVerifier::new();
@@ -33,13 +34,65 @@ pub(crate) fn source_attribute_verifier(source: &UUri) -> Result<AttributeVerifi
 }
 
 pub(crate) fn attributes_match_source_filter(attributes: &AttributeSet, filter: &UUri) -> bool {
+    // Request service names identify the destination method, not a particular
+    // caller. Discovery must not freeze the first client's source as authority.
+    // Broader physical candidates still pass decoded SDK source/sink admission.
+    if attribute_value(attributes, ATTR_TRANSPORT) == Some(TRANSPORT_VALUE)
+        && attribute_value(attributes, ATTR_SHARED_REQUEST) == Some("1")
+    {
+        return true;
+    }
     let Some(source) = source_from_attributes(attributes) else {
         return false;
     };
     normalized_filter(filter).is_some_and(|filter| filter.matches(&source))
 }
 
+pub(crate) fn request_service_matches_sink(
+    attributes: &AttributeSet,
+    service_name: &str,
+    sink_filter: Option<&UUri>,
+) -> bool {
+    if attribute_value(attributes, ATTR_SHARED_REQUEST) != Some("1") {
+        return true;
+    }
+    let Some(sink_filter) = sink_filter else {
+        return false;
+    };
+    // The unchanged request service key names its method. Physical candidate
+    // matching must include the destination so a reverse response registration
+    // cannot satisfy request TX readiness before the real server subscribes.
+    let method = || -> Option<UUri> {
+        let mut parts = service_name.split('/');
+        if parts.next()? != "up" {
+            return None;
+        }
+        let authority = parts.next()?;
+        let entity_type = parse_hex_u16(parts.next()?)?;
+        let instance = parse_hex_u16(parts.next()?)?;
+        let version = parse_hex_u8(parts.next()?)?;
+        let resource = parse_hex_u16(parts.next()?)?;
+        if parts.next().is_some() {
+            return None;
+        }
+        UUri::try_from_parts(
+            authority,
+            (u32::from(instance) << 16) | u32::from(entity_type),
+            version,
+            resource,
+        )
+        .ok()
+    };
+    method().is_some_and(|method| method.is_rpc_method() && sink_filter.matches(&method))
+}
+
 fn source_attribute_pairs(source: &UUri) -> Result<Vec<(AttributeKey, AttributeValue)>, UStatus> {
+    if source.is_rpc_response() {
+        return Ok(vec![
+            attribute(ATTR_TRANSPORT, TRANSPORT_VALUE)?,
+            attribute(ATTR_SHARED_REQUEST, "1")?,
+        ]);
+    }
     let authority = get_authority_name(source);
     Ok(vec![
         attribute(ATTR_TRANSPORT, TRANSPORT_VALUE)?,

@@ -332,19 +332,41 @@ fn main() {
         .unwrap();
     common::wait(&started, 2);
     std::hint::black_box(UUID::build());
-    let barrier = Arc::new(std::sync::Barrier::new(2));
-    let warmers: Vec<_> = (0..2)
+    thread_local! {
+        static WARMED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    }
+    let warmed = Arc::new(AtomicUsize::new(0));
+    let warmers: Vec<_> = (0..8)
         .map(|_| {
-            let barrier = Arc::clone(&barrier);
+            let warmed = Arc::clone(&warmed);
             runtime.spawn(async move {
-                barrier.wait();
-                tokio::task::yield_now().await;
+                while warmed.load(Ordering::Acquire) < 2 {
+                    let before = std::thread::current().id();
+                    tokio::task::yield_now().await;
+                    if before == std::thread::current().id()
+                        && WARMED.with(|flag| !flag.replace(true))
+                    {
+                        warmed.fetch_add(1, Ordering::AcqRel);
+                    }
+                    // Yielding/sleeping leaves both scheduler workers free to
+                    // steal setup work. A blocking barrier can strand its peer
+                    // in the same worker's local queue before native setup.
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
             })
         })
         .collect();
-    for task in warmers {
-        runtime.block_on(task).unwrap();
-    }
+    runtime.block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            for task in warmers {
+                task.await.unwrap();
+            }
+        })
+        .await
+        .expect("both actual runtime workers must finish bounded yield warmup");
+    });
+    assert_eq!(warmed.load(Ordering::Acquire), 2);
+    println!("setup_runtime_workers_warmed=2\tfirst_client_admission_warmed=false");
     for tokens in [false, true] {
         let core = common::core(std::mem::size_of::<Value>(), 1);
         let agreement = common::agreement();

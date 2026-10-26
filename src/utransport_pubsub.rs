@@ -35,7 +35,9 @@ use up_rust::{
 #[cfg(feature = "benchmark-owned")]
 use up_rust::{UNativePrefixWireTransport, UWire};
 
-use crate::service_attributes::{attributes_match_source_filter, source_attribute_verifier};
+use crate::service_attributes::{
+    attributes_match_source_filter, request_service_matches_sink, source_attribute_verifier,
+};
 use crate::service_name_mapping::{
     compute_exact_source_publish_subscribe_service_name, compute_service_name,
 };
@@ -260,11 +262,14 @@ impl Iceoryx2PubSub {
     }
 
     /// Lists services whose immutable source attributes match a source filter.
+    /// Shared method-addressed requests are omitted because their source is not
+    /// fixed; receiver registration discovers them with an explicit sink filter.
     pub fn discover_matching_service_names(
         &self,
         source_filter: &UUri,
     ) -> Result<Vec<String>, UStatus> {
-        self.inner.discover_matching_service_names(source_filter)
+        self.inner
+            .discover_matching_service_names(source_filter, None)
     }
 }
 
@@ -522,10 +527,17 @@ impl Iceoryx2PubSubInner {
     fn discover_matching_service_names(
         &self,
         source_filter: &UUri,
+        sink_filter: Option<&UUri>,
     ) -> Result<Vec<String>, UStatus> {
         let mut services = Vec::new();
         ipc_threadsafe::Service::list(self.node.config(), |service| {
-            if attributes_match_source_filter(service.static_details.attributes(), source_filter) {
+            if attributes_match_source_filter(service.static_details.attributes(), source_filter)
+                && request_service_matches_sink(
+                    service.static_details.attributes(),
+                    service.static_details.name().as_str(),
+                    sink_filter,
+                )
+            {
                 services.push(service.static_details.name().as_str().to_owned());
             }
             CallbackProgression::Continue
@@ -677,6 +689,11 @@ impl Iceoryx2PubSubInner {
             for (service_name, attributes) in &services {
                 if registration.subscribers.contains_key(service_name)
                     || !attributes_match_source_filter(attributes, &registration.source_filter)
+                    || !request_service_matches_sink(
+                        attributes,
+                        service_name.as_str(),
+                        registration.sink_filter.as_ref(),
+                    )
                 {
                     continue;
                 }
@@ -1249,7 +1266,7 @@ impl Iceoryx2PubSub {
                 .await;
             register_broad_receiver(&self.inner);
             self.inner
-                .discover_matching_service_names(source_filter)?
+                .discover_matching_service_names(source_filter, sink_filter)?
                 .into_iter()
                 .map(|service_name| {
                     ServiceName::new(service_name.as_str()).map_err(|error| {
@@ -1308,6 +1325,8 @@ impl Iceoryx2PubSub {
     /// Attaches an allocating-control sink using dynamic service discovery.
     ///
     /// Prepared zero-allocation applications use `Iceoryx2PreparedCore` instead.
+    /// Existing services matching a broad filter are subscribed during setup,
+    /// before this call reports success. Later service discovery remains dynamic.
     /// # Errors
     /// Rejects duplicate registrations or native subscriber exhaustion.
     pub async fn attach_encoded(
@@ -1342,6 +1361,22 @@ impl Iceoryx2PubSub {
                 .insert(service_name, Arc::new(subscriber));
         } else {
             register_broad_receiver(&self.inner);
+            // Prepared senders publish synchronously and do not call this
+            // allocating control's late-discovery registry. Complete subscriptions
+            // to already offered candidates before reporting listener readiness.
+            for name in self
+                .inner
+                .discover_matching_service_names(source_filter, sink_filter)?
+            {
+                let name = ServiceName::new(&name).map_err(|error| {
+                    UStatus::fail_with_code(
+                        UCode::InvalidArgument,
+                        format!("invalid discovered service: {error}"),
+                    )
+                })?;
+                let subscriber = self.inner.create_subscriber(name, None)?;
+                registration.subscribers.insert(name, Arc::new(subscriber));
+            }
         }
         listeners.push(registration);
         drop(listeners);

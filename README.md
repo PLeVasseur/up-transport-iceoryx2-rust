@@ -56,7 +56,12 @@ Both paths store encoded metadata in the sample prefix and use the iceoryx2 user
 header for physical placement. Prepared physical addressing follows the finite
 catalog; the SDK validates carried metadata, selected-wire identity and decoded
 source/sink filters before exposing a checked public lease. Dynamic owned
-controls additionally use immutable native service attributes for discovery.
+controls use compatible immutable native service attributes for discovery.
+Prepared services carry those same fields. Shared method-addressed request services
+use a shared-request marker instead of fixing one client as their source; decoded
+SDK source/sink checks remain authoritative. See [prepared discovery](docs/prepared.md).
+Broad owned registration completes subscriptions to already offered services
+before reporting readiness, so prepared senders need no per-message discovery work.
 
 Receive samples retain their backing subscriber state after listener unregister
 and transport destruction. Pending poller snapshots are invalidated when their

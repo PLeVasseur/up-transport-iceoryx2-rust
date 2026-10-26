@@ -3,6 +3,7 @@
 
 //! Setup-reserved native services, synchronous transmit and event-driven delivery.
 
+use crate::service_attributes::source_attribute_verifier;
 use crate::service_name_mapping::compute_service_name;
 use crate::{Iceoryx2PayloadLayout, Iceoryx2PubSubConfig, UProtocolHeader};
 use iceoryx2::port::update_connections::UpdateConnections;
@@ -174,6 +175,9 @@ impl Iceoryx2PreparedCore {
     /// reservation; it is never silently enlarged. Configuration retains the
     /// existing native subscriber/buffer/borrow/history/TX limits and namespace.
     /// Publisher readiness is checked by [`Self::wait_ready`] during setup.
+    /// Services carry the same immutable discovery attributes as owned controls.
+    /// Method-addressed requests use a shared-request marker rather than freezing
+    /// one client's source; decoded SDK filters remain authoritative.
     ///
     /// # Errors
     /// Rejects invalid/duplicate addresses, dynamic allocation, undersized slices,
@@ -247,46 +251,47 @@ impl Iceoryx2PreparedCore {
                 definition.sink.as_ref(),
                 MessagingPattern::PublishSubscribe,
             )?;
-            let (publisher, notifier) =
-                if let Some(previous) = endpoints.iter().find(|entry| entry.name == name) {
-                    (
-                        Arc::clone(&previous.publisher),
-                        Arc::clone(&previous.notifier),
-                    )
-                } else {
-                    // Request services are addressed by method, not client identity.
-                    // Semantic source/sink filtering remains in the SDK worker.
-                    let service = node
-                        .service_builder(&name)
-                        .publish_subscribe::<[u8]>()
-                        .user_header::<UProtocolHeader>()
-                        .open_or_create()
-                        .map_err(|_| setup_error("native prepared service cannot be opened"))?;
-                    verify_limits(&config, service.static_config(), &native)?;
-                    let publisher = service
-                        .publisher_builder()
-                        .initial_max_slice_len(config.publisher_initial_max_slice_len)
-                        .allocation_strategy(AllocationStrategy::Static)
-                        .create()
-                        .map_err(|_| setup_error("native prepared publisher cannot be reserved"))?;
-                    let initial = publisher
-                        .loan_slice_uninit(config.publisher_initial_max_slice_len)
-                        .map_err(|_| setup_error("native static segment cannot be materialized"))?;
-                    if config.publisher_prewarm {
-                        crate::pool_prewarm::preallocate(initial.payload().as_ptr() as usize)?;
-                    }
-                    drop(initial);
-                    let event = node
-                        .service_builder(&name)
-                        .event()
-                        .open_or_create()
-                        .map_err(|_| setup_error("native prepared event cannot be opened"))?;
-                    let notifier = event
-                        .notifier_builder()
-                        .create()
-                        .map_err(|_| setup_error("native event notifier cannot be reserved"))?;
-                    (Arc::new(publisher), Arc::new(notifier))
-                };
+            let (publisher, notifier) = if let Some(previous) =
+                endpoints.iter().find(|entry| entry.name == name)
+            {
+                (
+                    Arc::clone(&previous.publisher),
+                    Arc::clone(&previous.notifier),
+                )
+            } else {
+                // Request services are addressed by method, not client identity.
+                // Semantic source/sink filtering remains in the SDK worker.
+                let service = node
+                    .service_builder(&name)
+                    .publish_subscribe::<[u8]>()
+                    .user_header::<UProtocolHeader>()
+                    .open_or_create_with_attributes(&source_attribute_verifier(&definition.source)?)
+                    .map_err(|_| setup_error("native prepared service cannot be opened"))?;
+                verify_limits(&config, service.static_config(), &native)?;
+                let publisher = service
+                    .publisher_builder()
+                    .initial_max_slice_len(config.publisher_initial_max_slice_len)
+                    .allocation_strategy(AllocationStrategy::Static)
+                    .create()
+                    .map_err(|_| setup_error("native prepared publisher cannot be reserved"))?;
+                let initial = publisher
+                    .loan_slice_uninit(config.publisher_initial_max_slice_len)
+                    .map_err(|_| setup_error("native static segment cannot be materialized"))?;
+                if config.publisher_prewarm {
+                    crate::pool_prewarm::preallocate(initial.payload().as_ptr() as usize)?;
+                }
+                drop(initial);
+                let event = node
+                    .service_builder(&name)
+                    .event()
+                    .open_or_create()
+                    .map_err(|_| setup_error("native prepared event cannot be opened"))?;
+                let notifier = event
+                    .notifier_builder()
+                    .create()
+                    .map_err(|_| setup_error("native event notifier cannot be reserved"))?;
+                (Arc::new(publisher), Arc::new(notifier))
+            };
             endpoints.push(Endpoint {
                 definition: definition.clone(),
                 name,

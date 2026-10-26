@@ -14,6 +14,24 @@ address their source. Request services can have multiple clients. Physical
 delivery is a hint; the SDK's in-place header admission and decoded filters
 remain authoritative. `sink=None` matches sinkless catalog entries only.
 
+Prepared and dynamically discovered owned paths use compatible immutable native
+service attributes. Publications, notifications and responses retain their exact
+source discovery fields. A request service is shared by clients addressing one
+method; `up.request.shared=1` with `up.transport=uprotocol` marks that physical
+candidate without making the first caller the service's source authority. Dynamic
+discovery may therefore consider it for multiple source filters. The SDK still
+checks actual carried source, sink, kind and selected-wire identity before delivery.
+These setup attributes neither alter service names/frame bytes nor authenticate
+a publisher. They do not require additional native slots, ports or RX capacity.
+For shared requests, discovery also matches the configured sink against the method
+in the unchanged native service name. A reverse response listener therefore cannot
+satisfy a request publisher's subscriber-readiness count. Source-only service
+inspection omits shared requests because they do not have one immutable source.
+Owned broad-listener registration subscribes to already offered matching services
+before reporting success. Later discovery remains dynamic. This closes the
+first-sample race with prepared synchronous publishers, which do not invoke the
+allocating control's same-process late-discovery registry when sending.
+
 Reserve every possible RPC response destination before starting admission.
 The SDK server's first request from each client still creates its logical reply
 cache entry in the measured window. Resolving that entry uses an already created
@@ -28,6 +46,9 @@ threads with documented traffic before an allocation observation. Do not warm
 away SDK RPC first-client cache admission. Success, rejection, cancellation,
 tokens, receive and RPC must be counted with an all-thread allocator; calls and
 allocated bytes are separate observations and observer costs are not subtracted.
+The harness bounds scheduler warm-up and identifies each actual runtime worker
+after a same-thread yield. It does not block scheduler tasks on a native barrier,
+which could strand the second warm-up task on the first worker's queue.
 
 ## Event wait set and ordered delivery
 
