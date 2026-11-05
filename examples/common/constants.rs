@@ -14,7 +14,7 @@
 use std::time::Duration;
 
 /// The source filter publisher examples will use
-pub static SOURCE_FILTER_STR: &str = "up://device1/10AB/3/80CD";
+pub static SOURCE_FILTER_STR: &str = "up://device1/10AB/1/3/80CD";
 
 /// A UMessage will be published at this frequency
 #[allow(dead_code)]

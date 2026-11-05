@@ -15,7 +15,7 @@ use up_transport_iceoryx2_rust::Iceoryx2OwnedCore;
 
 fn topic(test_name: &str) -> UUri {
     let authority = format!("iox-owned-{test_name}-{}", std::process::id());
-    UUri::try_from_parts(&authority, 0x4210, 0x01, 0x9400).expect("topic URI")
+    UUri::try_from_parts(&authority, 0x0001_4210, 0x01, 0x9400).expect("topic URI")
 }
 
 fn metadata(topic: UUri) -> UFrameMetadata {

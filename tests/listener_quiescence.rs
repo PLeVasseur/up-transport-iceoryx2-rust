@@ -41,7 +41,7 @@ fn pair(timeout: Duration) -> (Transport, Arc<Transport>, UUri) {
     let mut config = config;
     config.listener_quiesce_timeout = timeout;
     let subscriber = Arc::new(Iceoryx2PubSub::with_config(config).with_selected_wire(ProtobufWire));
-    let source = UUri::try_from_parts("quiescence", 0x4210, 1, 0x9000).unwrap();
+    let source = UUri::try_from_parts("quiescence", 0x0001_4210, 1, 0x9000).unwrap();
     (publisher, subscriber, source)
 }
 

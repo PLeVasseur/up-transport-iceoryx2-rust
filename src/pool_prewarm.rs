@@ -173,11 +173,12 @@ mod tests {
             .unwrap();
         config.require_exact_service_limits = true;
         let transport = crate::Iceoryx2PubSub::try_with_config(config).unwrap();
-        let metadata =
-            UFrameMetadata::publish(UUri::try_from_parts("preserve", 0x4210, 1, 0x9000).unwrap())
-                .with_payload_encoding(PayloadEncoding::PROTOBUF)
-                .build()
-                .unwrap();
+        let metadata = UFrameMetadata::publish(
+            UUri::try_from_parts("preserve", 0x0001_4210, 1, 0x9000).unwrap(),
+        )
+        .with_payload_encoding(PayloadEncoding::PROTOBUF)
+        .build()
+        .unwrap();
         let encoded = UFrameFieldsMetadataCodec
             .encode_frame_metadata(
                 UWireMetadataContext::from_wire::<ProtobufWire, UFrameFieldsMetadataCodec>(),

@@ -143,9 +143,9 @@ fn response_accounting(
 
 fn rpc(runtime: &tokio::runtime::Runtime) {
     use up_transport_iceoryx2_rust::{Iceoryx2PreparedCore, Iceoryx2RouteReservation};
-    let method = UUri::try_from_parts("rpc-service", 0x4210, 1, 0x1000).unwrap();
+    let method = UUri::try_from_parts("rpc-service", 0x0001_4210, 1, 0x1000).unwrap();
     let replies: Vec<_> = (0..9)
-        .map(|id| UUri::try_from_parts("rpc-client", id + 1, 1, 0).unwrap())
+        .map(|id| UUri::try_from_parts("rpc-client", 0x0001_0000 | (id + 1), 1, 0).unwrap())
         .collect();
     let mut catalog = Vec::new();
     for reply in &replies {

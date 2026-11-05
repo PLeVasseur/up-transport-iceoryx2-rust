@@ -43,7 +43,7 @@ async fn iceoryx2_test_guard() -> MutexGuard<'static, ()> {
 
 fn topic(test_name: &str) -> UUri {
     let authority = format!("iox-r19-{test_name}-{}", std::process::id());
-    UUri::try_from_parts(&authority, 0x4210, 0x01, 0x9000).expect("topic URI")
+    UUri::try_from_parts(&authority, 0x0001_4210, 0x01, 0x9000).expect("topic URI")
 }
 
 fn test_config() -> iceoryx2::prelude::Config {
@@ -78,12 +78,12 @@ fn exact_source_service_name_helper_requires_exact_uuri() {
     let name =
         Iceoryx2PubSub::exact_source_publish_subscribe_service_name(&source).expect("service name");
     assert!(name.starts_with("up/iox-r19-exact-service-name-"));
-    assert!(name.ends_with("/4210/0/1/9000"));
+    assert!(name.ends_with("/4210/1/1/9000"));
 }
 
 #[test]
 fn exact_source_service_name_helper_rejects_wildcard_before_mapping() {
-    let wildcard = UUri::try_from_parts("vehicle", 0x4210, 0x01, 0xFFFF).unwrap();
+    let wildcard = UUri::try_from_parts("vehicle", 0x0001_4210, 0x01, 0xFFFF).unwrap();
     assert!(ExactUUri::try_from(wildcard).is_err());
 }
 
@@ -270,8 +270,8 @@ async fn request_receive_accepts_wildcard_source_and_exact_method_sink() {
     let publisher = core(&config).with_selected_wire(ProtobufWire);
     let subscriber = core(&config).with_selected_wire(ProtobufWire);
     let authority = format!("iox-r19-request-{}", std::process::id());
-    let reply_to = UUri::try_from_parts(&authority, 0x5BA0, 0x01, 0x0000).expect("reply URI");
-    let method = UUri::try_from_parts(&authority, 0x5BA0, 0x01, 0x1000).expect("method URI");
+    let reply_to = UUri::try_from_parts(&authority, 0x0001_5BA0, 0x01, 0x0000).expect("reply URI");
+    let method = UUri::try_from_parts(&authority, 0x0001_5BA0, 0x01, 0x1000).expect("method URI");
     let source_filter = UUri::try_from_parts("*", u32::MAX, u8::MAX, u16::MAX).expect("wildcard");
 
     let receive = receive_request_with_retry(subscriber, source_filter, method.clone());
@@ -909,7 +909,8 @@ async fn dynamic_publisher_delivers_a_large_first_request_across_processes() {
 
 async fn cross_process_first_send(test_name: &str, payload: &[u8], dynamic: bool, rpc: bool) {
     let mut config = test_config();
-    let sink = rpc.then(|| UUri::try_from_parts("readiness-service", 0x4210, 1, 0x1000).unwrap());
+    let sink =
+        rpc.then(|| UUri::try_from_parts("readiness-service", 0x0001_4210, 1, 0x1000).unwrap());
     if let Ok(prefix) = std::env::var("UP_ICEORYX2_READINESS_PEER_PREFIX") {
         config.global.prefix = FileName::new(prefix.as_bytes()).unwrap();
         let subscriber = core(&config).with_selected_wire(XcdrV2Wire);

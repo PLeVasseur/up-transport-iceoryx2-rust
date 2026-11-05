@@ -195,7 +195,7 @@ impl Iceoryx2PreparedCore {
     /// use up_transport_iceoryx2_rust::{Iceoryx2PreparedCore, Iceoryx2PubSubConfig,
     ///     Iceoryx2RouteReservation};
     /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
-    /// let source = UUri::try_from_parts("sensor", 0x4210, 1, 0x9000)?;
+    /// let source = UUri::try_from_parts("sensor", 0x0001_4210, 1, 0x9000)?;
     /// let config = Iceoryx2PubSubConfig::static_allocation(4096);
     /// let core = Iceoryx2PreparedCore::new(config, &[Iceoryx2RouteReservation {
     ///     source, sink: None,

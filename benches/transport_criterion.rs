@@ -43,7 +43,7 @@ fn benchmark_config() -> iceoryx2::prelude::Config {
 
 fn source() -> UUri {
     let authority = format!("iox-r19-benchmark-{}", std::process::id());
-    UUri::try_from_parts(&authority, 0x4210, 1, 0x9000).expect("benchmark source URI")
+    UUri::try_from_parts(&authority, 0x0001_4210, 1, 0x9000).expect("benchmark source URI")
 }
 
 fn selected_wire_round_trip(c: &mut Criterion) {

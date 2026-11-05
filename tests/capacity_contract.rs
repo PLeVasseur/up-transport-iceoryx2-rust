@@ -45,7 +45,7 @@ async fn logical_filters_delegate_to_independent_native_subscribers() {
     let a: Arc<dyn control::Listener<ProtobufWire>> = Arc::new(Capture(a));
     let b: Arc<dyn control::Listener<ProtobufWire>> = Arc::new(Capture(b));
     let directed: Arc<dyn control::Listener<ProtobufWire>> = Arc::new(Capture(directed));
-    let sink = UUri::try_from_parts("receiver", 0x4210, 1, 0).unwrap();
+    let sink = UUri::try_from_parts("receiver", 0x0001_4210, 1, 0).unwrap();
     receiver
         .register_validated_zero_copy_listener(&source(), None, a.clone())
         .await
@@ -387,7 +387,7 @@ fn config() -> Iceoryx2PubSubConfig {
 }
 
 fn source() -> UUri {
-    UUri::try_from_parts("capacity", 0x4210, 1, 0x9001).unwrap()
+    UUri::try_from_parts("capacity", 0x0001_4210, 1, 0x9001).unwrap()
 }
 
 fn spec(bytes: usize) -> UTxLoanSpec {

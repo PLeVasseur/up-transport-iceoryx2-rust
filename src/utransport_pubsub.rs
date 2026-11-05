@@ -1662,7 +1662,7 @@ mod retained_native_tests {
             limits.publisher_max_loaned_samples = 1;
             config.require_exact_service_limits = true;
             let core = Iceoryx2PubSub::try_with_config(config).unwrap();
-            let source = UUri::try_from_parts("native-address", 0x4210, 1, 0x9001).unwrap();
+            let source = UUri::try_from_parts("native-address", 0x0001_4210, 1, 0x9001).unwrap();
             let name =
                 compute_service_name(&source, None, MessagingPattern::PublishSubscribe).unwrap();
             let subscriber = Arc::new(core.inner.create_subscriber(name, Some(&source)).unwrap());

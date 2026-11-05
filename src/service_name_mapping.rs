@@ -119,50 +119,50 @@ mod tests {
 
     #[test]
     fn publish_service_name_uses_source_uri() {
-        let source = test_uri("device1", 0, 0x10ab, 3, 0x7fff);
+        let source = test_uri("device1", 1, 0x10ab, 3, 0x7fff);
         let name = compute_service_name(&source, None, MessagingPattern::PublishSubscribe).unwrap();
-        assert_eq!(name.as_str(), "up/device1/10AB/0/3/7FFF");
+        assert_eq!(name.as_str(), "up/device1/10AB/1/3/7FFF");
     }
 
     #[test]
     fn request_service_name_uses_sink_method_uri() {
-        let reply_to = test_uri("client", 0, 0x10ab, 3, 0x0000);
-        let method = test_uri("service", 0, 0x20bc, 1, 0x1000);
+        let reply_to = test_uri("client", 1, 0x10ab, 3, 0x0000);
+        let method = test_uri("service", 1, 0x20bc, 1, 0x1000);
         let name =
             compute_service_name(&reply_to, Some(&method), MessagingPattern::PublishSubscribe)
                 .unwrap();
-        assert_eq!(name.as_str(), "up/service/20BC/0/1/1000");
+        assert_eq!(name.as_str(), "up/service/20BC/1/1/1000");
     }
 
     #[test]
     fn response_service_name_uses_source_and_sink_uri() {
-        let method = test_uri("service", 0, 0x20bc, 1, 0x1000);
-        let reply_to = test_uri("client", 0, 0x10ab, 3, 0x0000);
+        let method = test_uri("service", 1, 0x20bc, 1, 0x1000);
+        let reply_to = test_uri("client", 1, 0x10ab, 3, 0x0000);
         let name =
             compute_service_name(&method, Some(&reply_to), MessagingPattern::PublishSubscribe)
                 .unwrap();
-        assert_eq!(name.as_str(), "up/service/20BC/0/1/1000/client/10AB/0/3/0");
+        assert_eq!(name.as_str(), "up/service/20BC/1/1/1000/client/10AB/1/3/0");
     }
 
     #[test]
     fn notification_service_name_uses_source_and_sink_uri() {
-        let source = test_uri("device1", 0, 0x10ab, 3, 0x8000);
-        let sink = test_uri("client", 0, 0x20bc, 1, 0x0000);
+        let source = test_uri("device1", 1, 0x10ab, 3, 0x8000);
+        let sink = test_uri("client", 1, 0x20bc, 1, 0x0000);
         let name =
             compute_service_name(&source, Some(&sink), MessagingPattern::PublishSubscribe).unwrap();
-        assert_eq!(name.as_str(), "up/device1/10AB/0/3/8000/client/20BC/0/1/0");
+        assert_eq!(name.as_str(), "up/device1/10AB/1/3/8000/client/20BC/1/1/0");
     }
 
     #[test]
     fn exact_publish_service_name_requires_exact_source_proof() {
-        let source = ExactUUri::try_from(test_uri("device1", 0, 0x10ab, 3, 0x7fff)).unwrap();
+        let source = ExactUUri::try_from(test_uri("device1", 1, 0x10ab, 3, 0x7fff)).unwrap();
         let name = compute_exact_source_publish_subscribe_service_name(&source).unwrap();
-        assert_eq!(name.as_str(), "up/device1/10AB/0/3/7FFF");
+        assert_eq!(name.as_str(), "up/device1/10AB/1/3/7FFF");
     }
 
     #[test]
     fn exact_publish_service_name_rejects_wildcard_source_before_mapping() {
-        let wildcard = UUri::try_from_parts("device1", 0x10ab, 3, 0xffff).unwrap();
+        let wildcard = UUri::try_from_parts("device1", 0x0001_10AB, 3, 0xffff).unwrap();
         assert!(ExactUUri::try_from(wildcard).is_err());
     }
 }

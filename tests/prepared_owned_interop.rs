@@ -26,7 +26,7 @@ impl UOwnedListener for OwnedReceiver {
 
 async fn round_trip(prepared_sender: bool, notification: bool) {
     let source = common::source();
-    let sink = notification.then(|| UUri::try_from_parts("receiver", 0x4211, 1, 0).unwrap());
+    let sink = notification.then(|| UUri::try_from_parts("receiver", 0x0001_4211, 1, 0).unwrap());
     let config = common::config(4096, 2);
     let prepared = Arc::new(
         Iceoryx2PreparedCore::new(
@@ -131,9 +131,9 @@ async fn owned_notification_reaches_prepared_receiver() {
 
 async fn shared_requests(prepared_sender: bool) {
     let config = common::config(4096, 4);
-    let method = UUri::try_from_parts("service", 0x4220, 1, 0x1000).unwrap();
+    let method = UUri::try_from_parts("service", 0x0001_4220, 1, 0x1000).unwrap();
     let clients: Vec<_> = (0..3)
-        .map(|id| UUri::try_from_parts("client", 0x4300 + id, 1, 0).unwrap())
+        .map(|id| UUri::try_from_parts("client", 0x0001_0000 | (0x4300 + id), 1, 0).unwrap())
         .collect();
     let catalog: Vec<_> = clients
         .iter()

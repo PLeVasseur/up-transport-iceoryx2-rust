@@ -318,7 +318,7 @@ async fn physical_route_and_loan_tables_fail_closed_and_reclaim() {
     ));
     drop(loan);
     drop(core.loan(&route, layout).unwrap());
-    let unknown = up_rust::UUri::try_from_parts("unknown", 1, 1, 0x9001).unwrap();
+    let unknown = up_rust::UUri::try_from_parts("unknown", 0x0001_0001, 1, 0x9001).unwrap();
     assert!(matches!(
         core.prepare_route(&unknown, None, limits),
         Err(up_rust::SetupError::InvalidRoute(_))

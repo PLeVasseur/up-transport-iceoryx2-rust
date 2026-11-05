@@ -40,7 +40,7 @@ fn config(enabled: bool, bytes: usize) -> Iceoryx2PubSubConfig {
 
 fn spec(bytes: usize) -> UTxLoanSpec {
     UTxLoanSpec::payload(
-        UFrameMetadata::publish(UUri::try_from_parts("pool", 0x4210, 1, 0x9000).unwrap())
+        UFrameMetadata::publish(UUri::try_from_parts("pool", 0x0001_4210, 1, 0x9000).unwrap())
             .with_payload_encoding(PayloadEncoding::PROTOBUF)
             .build()
             .unwrap(),
