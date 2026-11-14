@@ -1,63 +1,45 @@
 # iceoryx2 on the `up-rust-core` transport boundary
 
-Status: source design on `codex/up-rust-core-adapter`; no build or native claim.
-
-The intended layering is the same as LoLa:
-
-```text
-up-rust-core::TransportSetup
-    │
-    ├─ Iceoryx2Setup::recover_predecessor()
-    ├─ Iceoryx2Setup::prepare_route()
-    └─ TransportSetup::enter_runtime()
-          │
-          ▼
-    Iceoryx2Running: LendingRuntime
-          │
-          ├─ loan()      → iceoryx2 publisher loan
-          ├─ publish()   → iceoryx2 sample send
-          └─ receive()   → iceoryx2 subscriber queue
-```
-
-The application does not use an iceoryx2-specific send/receive API:
+The additive crate is [up-transport-iceoryx2-core](../core-adapter/README.md).
+It directly implements `up_rust_core::transport::{BindingSetup, LendingRuntime}`;
+the sibling classic crate retains its existing SDK dependency and API.
 
 ```rust
-let setup = Iceoryx2Setup::new(config, expected_peers)
-    .with_limits(limits);
-let transport = TransportSetup::lending(setup)?;
-let runtime = transport.enter_runtime(memory, clock)?;
-// Generic uProtocol roles now use the returned TransportRuntime.
+use up_rust_core::{memory::StartupMemory, platform::PlatformInit,
+    transport::{StartupError, TransportSetup}};
+use up_transport_iceoryx2_core::{Iceoryx2Config, Iceoryx2Peers, Iceoryx2Setup};
+
+fn prepare(memory: &StartupMemory, platform: &'static dyn PlatformInit)
+    -> Result<TransportSetup, StartupError>
+{
+    Iceoryx2Setup::new(Iceoryx2Config::default(), Iceoryx2Peers::default())
+        .into_transport_on(memory, platform)
+}
 ```
 
-The candidate two-mode source already has the correct conceptual split in the
-SDK integration snapshot: `Iceoryx2Setup` implements `BindingSetup`, while
-`Iceoryx2Running` implements `LendingRuntime`. The fork branch must bring that
-source across with the exact current core dependency and preserve the existing
-iceoryx2 service/QoS/loan semantics.
+Setup creates native nodes/services/ports and reserves routes. Runtime lends
+exclusive native transmit storage, consumes initialized frames on publication,
+and returns a receive owner retaining the native sample. The middleware queue
+remains the unread route queue. Every raw receive attempt consumes the caller's
+core `ReceiveBudget`; native receive errors latch a route fault.
 
-## What must remain explicit
+Native route/node resources are retained for the process lifetime, including
+when a direct runtime handle is dropped. Header/layout checks preserve metadata
+and payload extents, absent/present-empty semantics, and initialized padding.
+Setup sizing checks precede native unchecked arithmetic and use the opened
+service's actual type details and capacity getters.
 
-- iceoryx2 owns the sample storage and its queue remains the route queue;
-  the adapter must not add a second unread queue.
-- setup creates nodes, services, publishers, subscribers, listeners and peer
-  tables; runtime methods must not perform setup work.
-- peer-change allocation behavior is an explicit iceoryx2 permit. It is not
-  hidden behind a generic Rust claim of “no allocation.”
-- native sample owners remain alive through `Iceoryx2Rx` until the SDK drops the
-  frame; the `Frame` implementation must preserve that lease.
-- peer identity/incarnation and stale-peer handling remain part of the core
-  contract, not an optional transport diagnostic.
-- `AtomicU64` diagnostics must be isolated from any 32-bit runtime image.
+Independent review identified the required checked-sizing repair (R1), concurrent
+Wait deadline reset (R2), the selected overflowing-queue B1 race (R3), and evidence
+overstatements (R4). The R1/R4 correction received focused review; its final
+packed-index guard matches the selected native representation. Stable 1.98.1 and
+MSRV 1.88 checks and seven sizing regressions passed on each. R2/R3 remain
+runtime acceptance blockers. The old peer-change permit is not authorization to
+violate the product's no-heap/free/panic constraint. Aggregate queue depth, actual
+arrival accounting, fault containment, physical page reservation and complete
+lifecycle behavior remain unqualified. This POSIX implementation also retains
+64-bit atomics and has no MCU claim.
 
-## Next branch work
-
-1. Select the exact up-rust-core revision carrying `BindingSetup` and
-   `LendingRuntime`.
-2. Port the prepared `two_mode.rs` candidate into this fork without changing
-   the existing classic APIs.
-3. Reconcile the supporting modules and feature gates.
-4. Run independent unsafe-source review, then stable/MSRV host compilation.
-5. Push the reviewable feature branch to `PLeVasseur/up-transport-iceoryx2-rust`
-   only after the source and host result are coherent.
-
-No target, native, middleware, or ASIL qualification is claimed here.
+The core-adapter README carries the current dependency and host validation status.
+No native, middleware, target, or ASIL qualification is transferred from prior
+snapshots to this branch.

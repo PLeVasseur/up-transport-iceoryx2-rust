@@ -1,6 +1,11 @@
 # up-transport-iceoryx2-rust
 Rust uTransport implementation for iceoryx2
 
+The additive [core adapter](core-adapter/README.md) implements the new
+`up-rust-core` setup/runtime contracts in a separate crate. Its exact dependency,
+review and host-check status are documented there. The classic APIs described
+below keep their existing dependency and behavior.
+
 This crate implements the native `up-rust` direct zero-copy transport capability. Transmit loans are requested with `UTxLoanSpec`; payload serializers write into an iceoryx2 transmit loan through `UTxBuffer`, and subscribers receive lease-backed frames through `UZeroCopyRxLease`. Native frame metadata is fixed when the loan is created, then split between the fixed user header and an implementation metadata prefix so `UAttributes` and `PayloadEncoding` are preserved without exposing the prefix as application payload bytes.
 
 Native-frame conformance coverage includes `UFM1` prefix validation, standard and

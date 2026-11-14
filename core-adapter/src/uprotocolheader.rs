@@ -1,0 +1,368 @@
+// ################################################################################
+// Copyright (c) 2026 Contributors to the Eclipse Foundation
+//
+// SPDX-License-Identifier: Apache-2.0
+// ################################################################################
+
+use iceoryx2::prelude::ZeroCopySend;
+use std::{fmt, ops::Range};
+
+/// Physical iceoryx2 user header.
+///
+/// This header stores only placement facts for selected-wire metadata and the
+/// visible payload. Wire and payload identities remain in the metadata bytes.
+// ZeroCopySend derive checks the selected dependency's transport marker. This
+// repr(C) layout contains only u8/u64 values and explicit reserved bytes; it has
+// no references, ownership, Drop or interior mutation. All bit patterns of its
+// integer fields are valid; checked payload_layout handles hostile field values.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ZeroCopySend)]
+pub struct UProtocolHeader {
+    /// Physical header version, compared with the binding's supported major version.
+    pub uprotocol_major_version: u8,
+    /// Reserved bytes at offsets 1–7, written as zero and rejected if nonzero.
+    /// These explicit bytes replace padding without changing the header ABI.
+    pub reserved: [u8; 7],
+    /// Length in bytes of the encoded metadata prefix in the sample byte region.
+    pub metadata_len: u64,
+    /// Offset from the sample byte-region start to its visible payload.
+    pub payload_offset: u64,
+    /// Number of visible payload bytes, independently of metadata presence semantics.
+    pub payload_len: u64,
+    /// Requested payload alignment in bytes; must be a nonzero power of two.
+    pub payload_alignment: u64,
+}
+
+impl UProtocolHeader {
+    pub(crate) fn write_payload_layout(
+        &mut self,
+        layout: Iceoryx2PayloadLayout,
+    ) -> Result<(), FrameContractError> {
+        self.uprotocol_major_version = crate::UPROTOCOL_MAJOR_VERSION;
+        self.reserved = [0; 7];
+        self.metadata_len = u64::try_from(layout.metadata_len)
+            .map_err(|_| FrameContractError::FieldTooLarge("metadata_len"))?;
+        self.payload_offset = u64::try_from(layout.payload_offset)
+            .map_err(|_| FrameContractError::FieldTooLarge("payload_offset"))?;
+        self.payload_len = u64::try_from(layout.payload_len)
+            .map_err(|_| FrameContractError::FieldTooLarge("payload_len"))?;
+        self.payload_alignment = u64::try_from(layout.payload_alignment)
+            .map_err(|_| FrameContractError::FieldTooLarge("payload_alignment"))?;
+        Ok(())
+    }
+
+    pub(crate) fn payload_layout(
+        &self,
+        sample_payload_len: usize,
+    ) -> Result<Iceoryx2PayloadLayout, FrameContractError> {
+        if self.uprotocol_major_version != crate::UPROTOCOL_MAJOR_VERSION {
+            return Err(FrameContractError::UnsupportedMajorVersion(
+                self.uprotocol_major_version,
+            ));
+        }
+        if self.reserved != [0; 7] {
+            return Err(FrameContractError::NonZeroReservedBytes);
+        }
+        Iceoryx2PayloadLayout::validate(
+            usize::try_from(self.metadata_len)
+                .map_err(|_| FrameContractError::FieldTooLarge("metadata_len"))?,
+            usize::try_from(self.payload_offset)
+                .map_err(|_| FrameContractError::FieldTooLarge("payload_offset"))?,
+            usize::try_from(self.payload_len)
+                .map_err(|_| FrameContractError::FieldTooLarge("payload_len"))?,
+            usize::try_from(self.payload_alignment)
+                .map_err(|_| FrameContractError::FieldTooLarge("payload_alignment"))?,
+            sample_payload_len,
+        )
+    }
+}
+
+/// Checked metadata/payload extents within an iceoryx2 sample's byte region.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct Iceoryx2PayloadLayout {
+    // Safety invariant: metadata_len <= payload_offset and payload_offset +
+    // payload_len is representable; payload_alignment is a nonzero power of two.
+    // The creating check also verifies both extents fit its supplied sample len.
+    metadata_len: usize,
+    payload_offset: usize,
+    payload_len: usize,
+    payload_alignment: usize,
+}
+
+impl Iceoryx2PayloadLayout {
+    /// # Safety-usable invariant
+    /// Success guarantees disjoint metadata/payload extents within the supplied
+    /// sample length, checked end arithmetic, and nonzero power-of-two alignment.
+    /// It does not prove actual pointer alignment; the loan/receive path checks it.
+    pub(crate) fn from_validated_parts(
+        metadata_len: usize,
+        payload_offset: usize,
+        payload_len: usize,
+        payload_alignment: usize,
+        sample_payload_len: usize,
+    ) -> Result<Self, FrameContractError> {
+        Self::validate(
+            metadata_len,
+            payload_offset,
+            payload_len,
+            payload_alignment,
+            sample_payload_len,
+        )
+    }
+
+    /// Returns the encoded metadata prefix length in bytes.
+    pub fn metadata_len(&self) -> usize {
+        self.metadata_len
+    }
+
+    /// Returns the visible payload length in bytes.
+    pub fn payload_len(&self) -> usize {
+        self.payload_len
+    }
+
+    /// Returns the validated nonzero power-of-two alignment requirement.
+    pub fn payload_alignment(&self) -> usize {
+        self.payload_alignment
+    }
+
+    /// Returns the checked, end-exclusive payload range relative to the sample byte region.
+    pub fn payload_range(&self) -> Range<usize> {
+        self.payload_offset..self.payload_offset + self.payload_len
+    }
+
+    pub(crate) fn metadata_prefix<'a>(
+        &self,
+        sample_payload: &'a [u8],
+    ) -> Result<&'a [u8], FrameContractError> {
+        self.ensure_sample_len(sample_payload.len())?;
+        sample_payload
+            .get(..self.metadata_len)
+            .ok_or(FrameContractError::SampleTooSmall {
+                sample_payload_len: sample_payload.len(),
+                required_len: self.metadata_len,
+            })
+    }
+
+    pub(crate) fn payload<'a>(
+        &self,
+        sample_payload: &'a [u8],
+    ) -> Result<&'a [u8], FrameContractError> {
+        self.ensure_sample_len(sample_payload.len())?;
+        sample_payload
+            .get(self.payload_range())
+            .ok_or(FrameContractError::SampleTooSmall {
+                sample_payload_len: sample_payload.len(),
+                required_len: self.payload_offset + self.payload_len,
+            })
+    }
+
+    fn validate(
+        metadata_len: usize,
+        payload_offset: usize,
+        payload_len: usize,
+        payload_alignment: usize,
+        sample_payload_len: usize,
+    ) -> Result<Self, FrameContractError> {
+        if payload_alignment == 0 || !payload_alignment.is_power_of_two() {
+            return Err(FrameContractError::InvalidAlignment(payload_alignment));
+        }
+        if payload_offset < metadata_len {
+            return Err(FrameContractError::PayloadOffsetBeforeMetadata {
+                metadata_len,
+                payload_offset,
+            });
+        }
+        let required_len = payload_offset
+            .checked_add(payload_len)
+            .ok_or(FrameContractError::LayoutOverflow)?;
+        if required_len > sample_payload_len {
+            return Err(FrameContractError::SampleTooSmall {
+                sample_payload_len,
+                required_len,
+            });
+        }
+        Ok(Self {
+            metadata_len,
+            payload_offset,
+            payload_len,
+            payload_alignment,
+        })
+    }
+
+    fn ensure_sample_len(&self, sample_payload_len: usize) -> Result<(), FrameContractError> {
+        let required_len = self
+            .payload_offset
+            .checked_add(self.payload_len)
+            .ok_or(FrameContractError::LayoutOverflow)?;
+        if required_len > sample_payload_len {
+            return Err(FrameContractError::SampleTooSmall {
+                sample_payload_len,
+                required_len,
+            });
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum FrameContractError {
+    FieldTooLarge(&'static str),
+    InvalidAlignment(usize),
+    LayoutOverflow,
+    PayloadOffsetBeforeMetadata {
+        metadata_len: usize,
+        payload_offset: usize,
+    },
+    SampleTooSmall {
+        sample_payload_len: usize,
+        required_len: usize,
+    },
+    UnsupportedMajorVersion(u8),
+    NonZeroReservedBytes,
+}
+
+impl fmt::Display for FrameContractError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::FieldTooLarge(field) => write!(f, "frame contract field {field} exceeds usize"),
+            Self::InvalidAlignment(alignment) => write!(
+                f,
+                "payload alignment {alignment} must be a non-zero power of two"
+            ),
+            Self::LayoutOverflow => f.write_str("iceoryx2 frame layout overflows usize"),
+            Self::PayloadOffsetBeforeMetadata {
+                metadata_len,
+                payload_offset,
+            } => write!(
+                f,
+                "payload offset {payload_offset} precedes metadata length {metadata_len}"
+            ),
+            Self::SampleTooSmall {
+                sample_payload_len,
+                required_len,
+            } => write!(
+                f,
+                "sample payload length {sample_payload_len} is smaller than required frame length {required_len}"
+            ),
+            Self::UnsupportedMajorVersion(version) => {
+                write!(f, "unsupported uProtocol major version {version}")
+            }
+            Self::NonZeroReservedBytes => {
+                f.write_str("iceoryx2 reserved header bytes must be zero")
+            }
+        }
+    }
+}
+
+impl std::error::Error for FrameContractError {}
+
+/// What the binding needs from a frame's metadata on the pull path.
+pub(crate) struct FrameFacts {
+    /// Whether the frame carries a payload, including a present empty one.
+    pub(crate) payload_present: bool,
+    source_id: u64,
+}
+
+impl FrameFacts {
+    /// The stable identity of the frame's source.
+    pub(crate) fn source_id(&self) -> u64 {
+        self.source_id
+    }
+}
+
+/// Parses a frame's metadata once, for payload presence and the sender's stable
+/// identity. Returns `None` for metadata that does not parse, which is refused.
+pub(crate) fn frame_facts(metadata: &[u8]) -> Option<FrameFacts> {
+    let end = uframe_fields_prefix_end(metadata)?;
+    let header = up_rust_core::frame::header::parse_header(
+        metadata.get(..end)?,
+        metadata,
+        &up_rust_core::frame::header::HeaderLimits {
+            max_token_len: u16::MAX as usize,
+        },
+    )
+    .ok()?;
+    let source = &header.source;
+    Some(FrameFacts {
+        payload_present: header.payload_encoding.is_some(),
+        source_id: crate::peer_identity::stable_peer_id(
+            source.authority_name(),
+            (u32::from(source.ue_instance_id()) << 16) | u32::from(source.ue_type_id()),
+            source.uentity_major_version(),
+            source.resource_id(),
+        ),
+    })
+}
+
+/// The end of the selected-wire prefix: `UPWM`, the wire and family identities
+/// with their format version, and the layout identity.
+fn uframe_fields_prefix_end(metadata: &[u8]) -> Option<usize> {
+    fn identity_end(bytes: &[u8], start: usize) -> Option<usize> {
+        let end = match *bytes.get(start)? {
+            0 => start.checked_add(3)?,
+            1 => {
+                let word_end = start.checked_add(5)?;
+                let len = u32::from_le_bytes(bytes.get(start + 1..word_end)?.try_into().ok()?);
+                word_end.checked_add(usize::try_from(len).ok()?)?
+            }
+            _ => return None,
+        };
+        bytes.get(..end)?;
+        Some(end)
+    }
+    if metadata.get(..4)? != b"UPWM" {
+        return None;
+    }
+    let mut end = identity_end(metadata, 4)?.checked_add(2)?;
+    end = identity_end(metadata, end)?;
+    end = identity_end(metadata, end)?.checked_add(2)?;
+    Some(end)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn header_has_explicit_padding_and_preserves_its_physical_abi() {
+        use std::mem::{align_of, offset_of, size_of};
+        assert_eq!(size_of::<UProtocolHeader>(), 40);
+        assert_eq!(align_of::<UProtocolHeader>(), 8);
+        assert_eq!(offset_of!(UProtocolHeader, uprotocol_major_version), 0);
+        assert_eq!(offset_of!(UProtocolHeader, reserved), 1);
+        assert_eq!(offset_of!(UProtocolHeader, metadata_len), 8);
+        assert_eq!(offset_of!(UProtocolHeader, payload_offset), 16);
+        assert_eq!(offset_of!(UProtocolHeader, payload_len), 24);
+        assert_eq!(offset_of!(UProtocolHeader, payload_alignment), 32);
+        let mut header = UProtocolHeader {
+            reserved: [0xff; 7],
+            ..Default::default()
+        };
+        let layout = Iceoryx2PayloadLayout::from_validated_parts(3, 8, 7, 8, 15).unwrap();
+        header.write_payload_layout(layout).unwrap();
+        assert_eq!(header.reserved, [0; 7]);
+        assert_eq!(
+            header.uprotocol_major_version,
+            crate::UPROTOCOL_MAJOR_VERSION
+        );
+        assert!(header.payload_layout(15).is_ok());
+        header.reserved[6] = 1;
+        assert_eq!(
+            header.payload_layout(15),
+            Err(FrameContractError::NonZeroReservedBytes)
+        );
+    }
+
+    #[test]
+    fn payload_offset_length_and_alignment_are_explicit() {
+        let layout = Iceoryx2PayloadLayout::from_validated_parts(3, 8, 7, 8, 15).unwrap();
+        let mut header = UProtocolHeader::default();
+        header.write_payload_layout(layout).unwrap();
+
+        assert_eq!(header.metadata_len, 3);
+        assert_eq!(header.payload_offset, 8);
+        assert_eq!(header.payload_len, 7);
+        assert_eq!(header.payload_alignment, 8);
+        assert_eq!(header.payload_layout(15).unwrap().payload_range(), 8..15);
+    }
+}
