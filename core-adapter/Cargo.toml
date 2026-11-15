@@ -8,7 +8,7 @@ description = "Experimental iceoryx2 binding for the uProtocol two-mode core API
 readme = "README.md"
 
 [dependencies]
-up-rust-core = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "204eaa24cde3378620f5883a49881bbd7b4fabb4" }
+up-rust-core = { git = "https://github.com/PLeVasseur/up-rust.git", rev = "02c6340115f089dd13552f3a03ba30de1d98d8b4" }
 iceoryx2 = "=0.9.2"
 iceoryx2-bb-posix = "=0.9.2"
 iceoryx2-bb-system-types = "=0.9.2"

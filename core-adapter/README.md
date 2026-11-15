@@ -3,7 +3,18 @@
 This experimental crate implements `BindingSetup` and `LendingRuntime` directly
 from `up-rust-core`. It preserves the sibling classic crate and its SDK dependency.
 The core source is pinned to `PLeVasseur/up-rust` commit
-`20ed116605551fa96fa5bdf8f7ded57e75eae13f` on `codex/up-rust-core-binding`.
+`02c6340115f089dd13552f3a03ba30de1d98d8b4` on the experimental
+`codex/allocator-mcu-spike` branch. At this pin, `cargo check --locked --lib`
+passed with stable 1.98.1, Rust 1.88.0 and Rust 1.100.0 on an aarch64 macOS host,
+with the same single dead-code warning for three private layout helpers; no test,
+example or native service ran.
+
+On macOS and Linux this SDK revision selects its host execution model
+automatically. For `aarch64-apple-darwin`, `aarch64-unknown-linux-gnu` and
+`x86_64-unknown-linux-gnu` it also builds a small deadline C shim with the native
+`clang` and `ar` (cross-compiling the shim is not supported), and a Linux x86-64
+build must target a CX16 minimum ISA, for example `-C target-feature=+cmpxchg16b`.
+See the [SDK core README](https://github.com/PLeVasseur/up-rust/blob/02c6340115f089dd13552f3a03ba30de1d98d8b4/core/README.md).
 
 ```rust
 use up_rust_core::{memory::StartupMemory, platform::PlatformInit,
@@ -41,6 +52,9 @@ The lockfile records the actual resolution: iceoryx2, bb-posix and bb-system-typ
 are 0.9.2, while some transitive crates resolve to 0.9.3. Existing native receipts
 are not transferred to that graph. No native tests or middleware installation
 have been run for this crate.
+
+The following November 14 record was committed with the earlier SDK pin
+`20ed116605551fa96fa5bdf8f7ded57e75eae13f`; it is not evidence for the current pin.
 
 Host validation on macOS/aarch64, November 14, 2026:
 

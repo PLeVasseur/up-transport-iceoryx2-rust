@@ -687,7 +687,7 @@ checksum = "a2c754d6c33795a1c324727428e5a7dedb5b06195f9890bdbcba760d3e246563"
 [[package]]
 name = "up-rust-core"
 version = "0.10.0-SNAPSHOT"
-source = "git+https://github.com/PLeVasseur/up-rust.git?rev=204eaa24cde3378620f5883a49881bbd7b4fabb4#204eaa24cde3378620f5883a49881bbd7b4fabb4"
+source = "git+https://github.com/PLeVasseur/up-rust.git?rev=02c6340115f089dd13552f3a03ba30de1d98d8b4#02c6340115f089dd13552f3a03ba30de1d98d8b4"
 
 [[package]]
 name = "up-transport-iceoryx2-core"
