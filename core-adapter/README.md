@@ -3,18 +3,23 @@
 This experimental crate implements `BindingSetup` and `LendingRuntime` directly
 from `up-rust-core`. It preserves the sibling classic crate and its SDK dependency.
 The core source is pinned to `PLeVasseur/up-rust` commit
-`02c6340115f089dd13552f3a03ba30de1d98d8b4` on the experimental
+`08c0a83e174afea6b227e74c9dfaadf8b0828258` on the experimental
 `codex/allocator-mcu-spike` branch. At this pin, `cargo check --locked --lib`
 passed with stable 1.98.1, Rust 1.88.0 and Rust 1.100.0 on an aarch64 macOS host,
 with the same single dead-code warning for three private layout helpers; no test,
 example or native service ran.
 
-On macOS and Linux this SDK revision selects its host execution model
-automatically. For `aarch64-apple-darwin`, `aarch64-unknown-linux-gnu` and
-`x86_64-unknown-linux-gnu` it also builds a small deadline C shim with the native
-`clang` and `ar` (cross-compiling the shim is not supported), and a Linux x86-64
-build must target a CX16 minimum ISA, for example `-C target-feature=+cmpxchg16b`.
-See the [SDK core README](https://github.com/PLeVasseur/up-rust/blob/02c6340115f089dd13552f3a03ba30de1d98d8b4/core/README.md).
+On macOS, Linux and Windows x86-64 MSVC this SDK revision selects its host
+execution model automatically. For `aarch64-apple-darwin`,
+`aarch64-unknown-linux-gnu` and `x86_64-unknown-linux-gnu` it also builds a small
+deadline C shim natively with `clang` and `ar` (no cross-compilation). For
+`x86_64-pc-windows-msvc` it builds that shim with `clang` for the explicit MSVC
+target and archives it with `llvm-lib`; `CC`/`AR` may name them, and
+cross-compilation is supported. Both x86-64 targets must build for a CX16 minimum
+ISA, for example `-C target-feature=+cmpxchg16b`; the Windows GNU target is not
+supported. The SDK's Windows support is limited to its private deadline
+primitive, and no Windows build of this crate has been checked. See the
+[SDK core README](https://github.com/PLeVasseur/up-rust/blob/08c0a83e174afea6b227e74c9dfaadf8b0828258/core/README.md).
 
 ```rust
 use up_rust_core::{memory::StartupMemory, platform::PlatformInit,
