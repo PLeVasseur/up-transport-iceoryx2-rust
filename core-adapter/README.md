@@ -3,7 +3,7 @@
 This experimental crate implements `BindingSetup` and `LendingRuntime` directly
 from `up-rust-core`. It preserves the sibling classic crate and its SDK dependency.
 The core source is pinned to `PLeVasseur/up-rust` commit
-`08c0a83e174afea6b227e74c9dfaadf8b0828258` on the experimental
+`dc7f22da2bf90d98d94d468621df26caadf853ca` on the experimental
 `codex/allocator-mcu-spike` branch. At this pin, `cargo check --locked --lib`
 passed with stable 1.98.1, Rust 1.88.0 and Rust 1.100.0 on an aarch64 macOS host,
 with the same single dead-code warning for three private layout helpers; no test,
@@ -19,7 +19,7 @@ cross-compilation is supported. Both x86-64 targets must build for a CX16 minimu
 ISA, for example `-C target-feature=+cmpxchg16b`; the Windows GNU target is not
 supported. The SDK's Windows support is limited to its private deadline
 primitive, and no Windows build of this crate has been checked. See the
-[SDK core README](https://github.com/PLeVasseur/up-rust/blob/08c0a83e174afea6b227e74c9dfaadf8b0828258/core/README.md).
+[SDK core README](https://github.com/PLeVasseur/up-rust/blob/dc7f22da2bf90d98d94d468621df26caadf853ca/core/README.md).
 
 ```rust
 use up_rust_core::{memory::StartupMemory, platform::PlatformInit,
