@@ -20,7 +20,7 @@ The quotation states an assumption of use of the up-rust SEooC, including future
 > For a deployment that uses iceoryx2, the integrator provides the following.
 >
 > * *The process's level.* On iceoryx2 a transport runs at its process's level.
-> * *One level per service.* iceoryx2 is a binding whose ports write shared state both ways, so `+aou~seooc-peer-access~5+`, "Two-way shared state", binds every iceoryx2 service.
+> * *One level per service.* iceoryx2 is a binding whose ports write shared state both ways, so xref:deployment.adoc#aou-seooc-peer-access[Only authorized processes reach the transport, and peers are faulty, never malicious], "Two-way shared state", binds every iceoryx2 service.
 > * *Domains and OS users.* Each level runs in its own iceoryx2 domain, and its processes under their own OS user, so that a faulty lower process cannot open, map or remove a higher level's shared memory.
 <!-- aou-statement:end -->
 

@@ -22,15 +22,15 @@ The quotation states an assumption of use of the up-rust SEooC, including future
 > The iceoryx2 binding claims no 32-bit target, because iceoryx2 0.9 needs 64-bit atomics and its bare-metal port is a proof of concept.
 >
 > *Accepted limits and known anomalies.*
-> The integrator accepts the limits and known anomalies that each binding's README states (`+req~ssr-binding-readme~1+`, `+aou~seooc-qualified-bindings-and-wires~7+`). For a deployment that uses iceoryx2, these include:
+> The integrator accepts the limits and known anomalies that each binding's README states (xref:bindings.adoc#req-ssr-binding-readme[The README says what the middleware cannot guarantee]; xref:deployment.adoc#aou-seooc-qualified-bindings-and-wires[Bindings and wires pass their contracts]). For a deployment that uses iceoryx2, these include:
 >
-> * allocation on a peer join or restart, under the waiver (`+UPW-iceoryx2-1+`), the permit whose waiver `+aou~seooc-waiver-approval~3+` has the deployment's owner review and file;
+> * allocation on a peer join or restart, under the waiver (`+UPW-iceoryx2-1+`), the permit whose waiver xref:../seooc-up-rust/assumptions-of-use.adoc#aou-seooc-waiver-approval[Waivers are approved with an interference argument] has the deployment's owner review and file;
 > * sizing of the expired-connection buffer: a receive route is refused at setup unless twice its retained budget fits in it;
-> * the service depth, which now comes from deployment data (`+req~ssr-binding-depth-from-deployment~1+`): the service depths are part of the deployment data that `+aou~seooc-deployment-data~6+` covers;
+> * the service depth, which comes from deployment data (<<req-ssr-binding-depth-from-deployment,iceoryx2's service depth comes from deployment data>>): the service depths are part of the deployment data that xref:../seooc-up-rust/assumptions-of-use.adoc#aou-seooc-deployment-data[Deployment data is in range, verified and protected] covers;
 > * the port mutex's panic path, on lock and on unlock, which no peer can reach (`+UPD-IOX2-0001+`, revision 2);
 > * the two `+blocking_send+` `+unwrap+`s, which only a failing OS clock call reaches (`+UPD-IOX2-0002+`);
 > * iceoryx2's other accepted panic paths: two process-private invariants; a descriptor that other code in the process closes while a socket is set up; `+close()+` failing on a departed peer's descriptor; and a sample counter's overflow on 64-bit targets, at over 580 years at 10^9^ sends per second (`+UPD-IOX2-0003+`, `+UPD-IOX2-0004+`, `+UPD-IOX2-0005+`);
-> * heap exhaustion during a peer change, which aborts, within the deployment's heap sizing under `+UPW-iceoryx2-1+` (`+UPD-IOX2-0006+`): on iceoryx2 an allocation that fails during a peer change aborts the process, so that sizing is the one `+aou~seooc-waiver-approval~3+`, "Heap sizing", requires;
+> * heap exhaustion during a peer change, which aborts, within the deployment's heap sizing under `+UPW-iceoryx2-1+` (`+UPD-IOX2-0006+`): on iceoryx2 an allocation that fails during a peer change aborts the process, so that sizing is the one xref:../seooc-up-rust/assumptions-of-use.adoc#aou-seooc-waiver-approval[Waivers are approved with an interference argument], "Heap sizing", requires;
 > * arrival reports from its receive thread, within that thread's period plus its stated pass bound, on a drained notification of the route's data ID together with a sample in the queue or taken since the previous pass, or on the queue turning non-empty;
 > * a sender preempted between `+send+` and its notification delays the report, unless the queue was empty at the previous pass; a notification that fails at the sender while the queue holds samples leaves an arrival unreported, so a miss may be counted for a gap no longer than the deadline, and the sender counts the failure;
 > * while a new publisher's data connection is being set up, its notification can be reported while older samples are queued;
@@ -38,16 +38,16 @@ The quotation states an assumption of use of the up-rust SEooC, including future
 > * the event IDs are read from the event service's static config, and a route whose lifecycle events share the data ID, or whose data ID is above the service's `+event_id_max_value+`, is refused at setup.
 >
 > *Known failures.*
-> The README also says that a frame drop can wait for the port mutex. That is not an accepted limit, because `+req~ssr-binding-frame-drop~6+` forbids it. It is the binding's known failure `+UPF-IOX2-0001+`, open until the binding returns each dropped frame to iceoryx2 through its deferred return as pending cleanup, charged and isolated as `+req~ssr-release-lease-drop~4+` requires; a thread of its own is not by itself that isolation.
+> The README also says that a frame drop can wait for the port mutex. That is not an accepted limit, because xref:bindings.adoc#req-ssr-binding-frame-drop[What a received frame's destructor may do] forbids it. It is the binding's known failure `+UPF-IOX2-0001+`, open until the binding returns each dropped frame to iceoryx2 through its deferred return as pending cleanup, charged and isolated as xref:../seooc-up-rust/release.adoc#req-ssr-release-lease-drop[A lease gives back its slot and nothing else] requires; a thread of its own is not by itself that isolation.
 >
-> iceoryx2's other known failures are not accepted limits either, because `+req~ssr-binding-no-panic~5+` forbids them: its index bug on a connection change (`+UPF-IOX2-0002+`), until iceoryx2 fixes the index; its event-deadline panics, on QM transports only, since ASIL deployments turn those deadlines off, until iceoryx2 fixes them (`+UPF-IOX2-0005+`); and the paths through which a peer that writes values its own iceoryx2 never writes can panic its survivors, until iceoryx2 validates what peers write (`+UPF-IOX2-0004+`).
+> iceoryx2's other known failures are not accepted limits either, because xref:bindings.adoc#req-ssr-binding-no-panic[No panic on any peer input] forbids them: its index bug on a connection change (`+UPF-IOX2-0002+`), until iceoryx2 fixes the index; its event-deadline panics, on QM transports only, since ASIL deployments turn those deadlines off, until iceoryx2 fixes them (`+UPF-IOX2-0005+`); and the paths through which a peer that writes values its own iceoryx2 never writes can panic its survivors, until iceoryx2 validates what peers write (`+UPF-IOX2-0004+`).
 >
 > The wait thread's descriptor-set panics (`+UPF-IOX2-0006+`) remain until its own poll loop replaces that set, or a reviewed equivalent with a source-backed argument is adopted in its place, and unsafe name and queue-size configuration (`+UPF-IOX2-0007+`) remains until setup refuses it.
 >
 > The expired-buffer failure is fixed by the twice-budget setup refusal; it is recorded separately as fixed, not as an accepted anomaly.
 >
 > *Strict mode.*
-> In strict mode, the Enforce state refuses any known failure, whatever is acknowledged (`+aou~seooc-qualified-bindings-and-wires~7+`); while iceoryx2's known failures stand, that refuses each affected route at ASIL, including publishers affected by shared-state faults.
+> In strict mode, the Enforce state refuses any known failure, whatever is acknowledged (xref:deployment.adoc#aou-seooc-qualified-bindings-and-wires[Bindings and wires pass their contracts]); while iceoryx2's known failures stand, that refuses each affected route at ASIL, including publishers affected by shared-state faults.
 <!-- aou-statement:end -->
 
 ## Integrator actions
